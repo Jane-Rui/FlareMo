@@ -2,7 +2,7 @@
 
 **Cloudflare 原生 · Memos 兼容 · 个人知识管理平台**
 
-A Memos-compatible, Cloudflare-native personal knowledge management system.
+基于 Memos 兼容协议、完整部署在 Cloudflare 上的个人知识管理系统。
 
 [![GitHub stars](https://img.shields.io/github/stars/realchendahuang/FlareMo?style=social)](https://github.com/realchendahuang/FlareMo)
 [![GitHub forks](https://img.shields.io/github/forks/realchendahuang/FlareMo?style=social)](https://github.com/realchendahuang/FlareMo)
@@ -28,14 +28,9 @@ A Memos-compatible, Cloudflare-native personal knowledge management system.
 - 想要 Memos 那种**成熟开源生态、数据可迁、API 能玩**;
 - 又不想再开一台 VPS、维护 Docker、Postgres、Node 常驻进程。
 
-那怎么办。FlareMo 的做法是把 Memos 的数据模型和 `/api/v1` 当成"规范",运行时**整个重搭到 Cloudflare 上**:Workers 跑 API、D1 存笔记、R2 放附件、Queues/Cron 跑后台、Vectorize + Workers AI 留给以后的语义检索和 AI 工作流。
+那怎么办。FlareMo 的做法是把 Memos 的数据模型和 `/api/v1` 当成"规范",运行时**整个重搭到 Cloudflare 上**:Workers 跑 API、D1 存笔记，附件和导出放 R2，语义检索和 AI 工作流以后再接 Vectorize 与 Workers AI。
 
 **站在 Memos 的肩膀上,做一份长在边缘云上的个人知识库。**
-
-> The idea: keep the quick-capture spirit of Flomo, reuse the Memos
-> ecosystem as much as possible, and make the whole stack deployable on
-> Cloudflare — no long-running VM, Docker, Postgres, or Node server as a
-> core production dependency.
 
 ## 定位
 
@@ -48,11 +43,6 @@ FlareMo 不是"再来一个笔记 App",目标分三段走:
 | **v2** | 真正的个人知识管理平台 | 问我的笔记、每日/每周回顾、相关笔记、附件抽取、AI 标签建议 |
 
 一条硬约束从开仓那天就定死:**全部跑在 Cloudflare 上**。Workers 是"一个请求跑一次"的世界,没有常驻进程、本地文件、原生 SQLite 驱动这些传统后端假设。代价是架构基本要重写,好处是零运维、按量计费,而且天然接得上 Cloudflare 的 AI、向量、队列。
-
-**Positioning:** a staged personal knowledge platform — start as a
-Flomo-style capture + Memos-compatible note system on Cloudflare, then
-grow into semantic search and AI-driven knowledge workflows, while
-staying fully Cloudflare-native every step of the way.
 
 ## FlareMo 是什么
 
@@ -70,8 +60,8 @@ staying fully Cloudflare-native every step of the way.
    - Workers 跑 API 与边缘运行时。
    - D1 存关系型数据。
    - R2 存附件、导出包、生成物、音频。
-   - Queues / Cron 跑后台任务。
-   - Vectorize + Workers AI 承载未来的语义检索与 AI 工作流。
+   - Queues / Cron 只在出现后台任务时启用。
+   - Vectorize + Workers AI 只在语义检索与 AI 工作流稳定后启用。
 
 3. **Flomo 风格的产品体验**
    - 收集为先的写作流。
@@ -152,10 +142,10 @@ flowchart LR
 
   Worker --> D1["D1: notes, users, settings, relations"]
   Worker --> R2["R2: attachments and exports"]
-  Worker --> KV["KV: cache and lightweight config"]
-  Worker --> Queues["Queues/Cron: async jobs"]
-  Queues --> Vectorize["Vectorize: semantic index"]
-  Queues --> AI["Workers AI / external AI providers"]
+  Worker -. optional .-> KV["KV: cache and lightweight config"]
+  Worker -. optional .-> Queues["Queues/Cron: async jobs"]
+  Queues -. optional .-> Vectorize["Vectorize: semantic index"]
+  Queues -. optional .-> AI["Workers AI / external AI providers"]
 ```
 
 ## 路线图
@@ -184,7 +174,7 @@ FlareMo 学习自:
 - [XuYouo/MeowNocode](https://github.com/XuYouo/MeowNocode):轻量
   Cloudflare D1 笔记应用参考。
 
-## Star History
+## Star 历史
 
 仓库从第一天起就公开造,Star 增长曲线会出现在这里:
 
@@ -197,7 +187,7 @@ FlareMo 学习自:
   </picture>
 </a>
 
-## Build in Public
+## 公开开发
 
 **从开仓第一天起就公开造**。架构决策、踩坑记录、阶段目标都摊在仓库
 里,欢迎围观、提 issue、提方向。

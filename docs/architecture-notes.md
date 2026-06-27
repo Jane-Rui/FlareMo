@@ -1,245 +1,213 @@
-# FlareMo Architecture Notes
+# FlareMo 架构设计
 
-This note captures the first-pass reference study for building a Flomo-like,
-Cloudflare-native note product.
+这份文档描述 FlareMo 当前的架构方向。它是开源仓库里的结果型设计文档，不是过程记录。后续架构变化应直接修改本文原文。
 
-Reference repositories are cloned locally under `Temp/` and intentionally
-ignored by Git:
+本地参考仓库放在 `Temp/` 下，并通过 `.gitignore` 排除在版本库之外：
 
-- `Temp/MeowNocode` from `XuYouo/MeowNocode`
-- `Temp/blinko` from `blinkospace/blinko`
-- `Temp/memos` from `usememos/memos`
+- `Temp/MeowNocode`：来自 `XuYouo/MeowNocode`
+- `Temp/blinko`：来自 `blinkospace/blinko`
+- `Temp/memos`：来自 `usememos/memos`
 
-## Goal
+## 目标
 
-Build a fast capture-first note app with a Flomo-like frontend, but make the
-whole product Cloudflare-native:
+FlareMo 要做一个 Flomo 风格、Memos 兼容、完整运行在 Cloudflare 上的个人知识管理系统。
 
-- Static frontend served from Cloudflare.
-- API on Workers.
-- Main relational data in D1.
-- Attachments and exports in R2.
-- Optional AI features through Workers AI or external model providers.
-- Optional semantic index in Vectorize.
-- No long-running VM, Docker service, Postgres server, or Node server as the
-  core production dependency.
+核心目标：
 
-## Strategic Direction
+- 快速记录，打开就能写。
+- 对外提供 Memos 兼容 API，方便复用 Memos 生态。
+- 前端和 API 都运行在 Cloudflare Workers 上。
+- 笔记、用户、关系、分享、设置等主数据存 D1。
+- 附件、导出包、生成资源和音频存 R2。
+- 后续语义检索和 AI 工作流可以接入 Vectorize 和 Workers AI。
+- 不依赖 VPS、Docker、Postgres、Node 常驻进程或本地文件系统。
 
-Use Memos as the primary base and ecosystem anchor.
+## 总体方向
 
-This does not mean running the Go Memos server on Cloudflare. It means:
+FlareMo 以 Memos 作为生态锚点，但不复制 Memos 的内部实现。
 
-- Treat Memos' domain model, resource names, `/api/v1` protocol, OpenAPI shape,
-  import/export expectations, and MCP direction as the main compatibility
-  target.
-- Rebuild the runtime for Cloudflare Workers, D1, R2, Queues/Cron, and
-  Vectorize.
-- Keep FlareMo's product experience more Flomo-like: faster capture, calmer
-  timeline, lighter navigation, and fewer admin/social surfaces.
-- Use Blinko and MeowNocode only as feature references.
+这意味着：
 
-Current repository signals support this weighting:
+- Memos 的领域模型、资源命名、`/api/v1` 协议、OpenAPI、导入导出和 MCP 方向，是 FlareMo 的对外兼容目标。
+- FlareMo 的内部实现围绕 Cloudflare Workers、D1、R2、Drizzle、Hono 和 TypeScript 重建。
+- 产品体验更接近 Flomo：更快记录、更安静的时间线、更轻的导航、更少后台感和社交感。
+- Blinko 和 MeowNocode 只作为功能参考，不作为架构基底。
 
-- `usememos/memos`: MIT, about 61k stars, about 4.5k forks, active in 2026.
-- `blinkospace/blinko`: GPL-3.0, about 10k stars, useful ideas but not a clean
-  copy/paste base for a separate product.
-- `XuYouo/MeowNocode`: MIT, smaller project, useful Cloudflare/D1 precedent.
+当前参考项目的权重：
 
-The practical goal is a Cloudflare-native Memos-compatible product, not a
-generic note app that merely imports Memos data.
+- `usememos/memos`：MIT，生态最大，是模型、API 和兼容层的主参考。
+- `blinkospace/blinko`：GPL-3.0，适合作为 AI 检索、附件、引用、编辑器交互参考，不适合复制源码作为基底。
+- `XuYouo/MeowNocode`：MIT，适合作为轻量 Cloudflare/D1 笔记应用参考。
 
-## Reference Summary
+FlareMo 的实际目标不是“能导入 Memos 数据的普通笔记 App”，而是“Cloudflare-native 的 Memos-compatible 个人知识系统”。
 
-### MeowNocode
-
-Useful Cloudflare-light reference, but not the product/protocol base.
-
-Useful parts:
-
-- React + Vite frontend with a compact memo input and recent-thought timeline.
-- Existing Cloudflare D1 deployment story.
-- D1 schema and Worker API examples for basic memo/settings CRUD.
-- Local-first thinking: localStorage, export/import, backup/restore, delayed sync.
-- Extra lightweight productivity ideas: heatmap, daily review, backlinks, canvas
-  mode, public/private toggle.
-
-Problems to avoid:
-
-- The schema is too ad hoc for a durable product. Several structured fields
-  are JSON text columns (`tags`, `backlinks`, `audio_clips`), and old/new worker
-  schema variants diverge on `user_id`.
-- Authentication is effectively password-gate style, not a proper multi-user
-  identity model.
-- Cloud sync is client-heavy and conflict handling is fragile.
-- Too many secondary features are already mixed into the main page state.
-
-Borrow as inspiration, not as the backend or ecosystem foundation.
-
-### Blinko
-
-Strong feature reference, too heavy to port directly.
-
-Useful parts:
-
-- AI-first note retrieval flow: normal search can escalate into AI/vector search.
-- Attachment and note reference model.
-- Note history, internal share, public share, archived/recycle flags.
-- Rich editor behavior: draft persistence, file drop, references, quick capture,
-  hotkeys, mobile/desktop variants.
-- AI indexing pipeline: chunk note content, embed, mark indexed, rebuild index
-  with progress tracking.
-
-Problems to avoid:
-
-- Backend is a Bun/Node service with Prisma + Postgres.
-- The app model is broad: accounts, comments, follows, notifications, plugins,
-  MCP servers, AI providers, conversations, scheduled tasks, fonts.
-- Some infrastructure assumes filesystem or long-running workers.
-- License is GPL-3.0, so do not copy code into a non-GPL product. Treat it as
-  product and architecture reference only unless we intentionally accept GPL.
-
-Borrow selectively: AI/search patterns, reference model, attachment UX, and
-editor interaction ideas.
+## 参考项目定位
 
 ### Memos
 
-Primary base for model, API, ecosystem, and migration compatibility.
+Memos 是 FlareMo 的主要生态和兼容目标。
 
-Useful parts:
+值得借鉴：
 
-- Clean memo domain: `content`, `visibility`, `pinned`, `row_status`, creator,
-  created/updated timestamps.
-- `payload` stores computed metadata such as tags, link/task/code flags, title,
-  and location without over-normalizing the first version.
-- Separate tables for attachments, memo relations, shares, reactions, settings,
-  identities.
-- Timeline-first capture product philosophy.
-- React Query cache strategy and optimistic update patterns.
-- Mature markdown rendering, editor decomposition, filters, tags, stats, and
-  share image flow.
+- 清晰的 memo 领域模型：`content`、`visibility`、`pinned`、`row_status`、creator、created/updated timestamps。
+- 用 `payload` / `property` 承载计算属性，例如 tags、link/task/code 标记、title、location。
+- attachments、memo relations、shares、settings、identities 等独立模型。
+- 时间线优先的产品思路。
+- React Query 缓存和乐观更新策略。
+- Markdown 渲染、编辑器拆分、过滤器、标签、统计、分享图等前端经验。
+- OpenAPI 和 MCP 方向。
 
-Runtime problems to avoid:
+不能照搬：
 
-- Go single-binary backend is not directly portable to Workers.
-- Echo `http.Server`, `database/sql`, local SQLite/MySQL/Postgres drivers,
-  filesystem file serving, SSE connection hub, and background runners do not map
-  directly to Cloudflare's request/binding model.
-- Multi-database abstraction and admin/server features add weight.
+- Go 单体服务。
+- Echo `http.Server`。
+- `database/sql` 和本地 SQLite/Postgres/MySQL 驱动。
+- 本地文件服务。
+- SSE 连接管理。
+- 后台 runner。
+- 多数据库抽象和实例管理后台。
 
-Borrow Memos' product model and public protocol aggressively, but replace the
-runtime.
+Memos 对 FlareMo 来说是协议、生态和产品模型参考，不是运行时模板。
 
-## Cloudflare-Native Product Boundary
+### Blinko
 
-The initial architecture should be a Worker-first full-stack app:
+Blinko 是功能参考，不是架构基底。
 
-- One Worker serves static React/Vite assets and `/api/*`.
-- D1 is the source of truth for notes, users, tags, settings, shares, and
-  attachment metadata.
-- R2 stores binary attachments, generated share images, import/export archives,
-  and audio files.
-- KV is only for cache/config/rate-limit/session-adjacent data where eventual
-  consistency is acceptable.
-- Durable Objects are not required for v1. Use them later only for live sync,
-  collaborative editing, per-user queues, rate limiting, or WebSocket features.
-- Queues/Cron can later handle embeddings, link previews, cleanup, and exports.
-- Vectorize can hold semantic search vectors once AI search becomes real.
+值得借鉴：
 
-This keeps the first version within Cloudflare products and avoids maintaining
-Docker/Postgres/Node services.
+- 普通搜索升级到 AI / vector search 的产品路径。
+- 附件和 note reference 的交互。
+- note history、internal share、public share、archive/recycle 等状态设计。
+- 编辑器里的 draft persistence、file drop、references、quick capture、hotkeys。
+- embedding pipeline：chunk note content、embed、mark indexed、rebuild index。
 
-## Memos Compatibility Strategy
+不能照搬：
 
-Compatibility should be a product feature, not a vague aspiration.
+- Bun/Node 后端。
+- Prisma + Postgres。
+- 过宽的应用模型：comments、follows、notifications、plugins、MCP servers、AI providers、conversations、scheduled tasks、fonts。
+- GPL-3.0 代码。
 
-### Compatibility Tiers
+### MeowNocode
 
-Tier 0: Data compatibility.
+MeowNocode 是轻量 Cloudflare/D1 参考。
 
-- Use Memos-like tables and fields: users, user settings, memo, memo relations,
-  attachments, shares, reactions where useful.
-- Preserve Memos resource naming: `memos/{id}`, `users/{id}`,
-  `attachments/{id}`.
-- Store computed memo metadata in a `payload`/`property` shape compatible with
-  Memos: tags, title, has_link, has_task_list, has_code,
-  has_incomplete_tasks, location.
-- Provide Memos import/export paths.
+值得借鉴：
 
-Tier 1: REST API subset compatibility.
+- React + Vite 的轻量前端。
+- Cloudflare D1 部署路径。
+- 基础 memo/settings CRUD。
+- 本地优先、导入导出、延迟同步思路。
+- heatmap、daily review、backlinks、canvas mode、public/private toggle 等轻功能。
 
-- Implement high-value `/api/v1` endpoints from Memos:
-  - `POST /api/v1/memos`
-  - `GET /api/v1/memos`
-  - `GET /api/v1/{name=memos/*}`
-  - `PATCH /api/v1/{memo.name=memos/*}`
-  - `DELETE /api/v1/{name=memos/*}`
-  - `PATCH /api/v1/{name=memos/*}/attachments`
-  - `GET /api/v1/{name=memos/*}/attachments`
-  - `PATCH /api/v1/{name=memos/*}/relations`
-  - `GET /api/v1/{name=memos/*}/relations`
-  - `POST /api/v1/{parent=memos/*}/shares`
-  - `GET /api/v1/shares/{share_id}`
-  - `POST /api/v1/attachments`
-  - `GET /api/v1/attachments`
-  - `GET /api/v1/{name=attachments/*}`
-  - `DELETE /api/v1/{name=attachments/*}`
-- Support bearer tokens/personal access tokens enough for scripts and tools.
-- Support common `page_size`, `page_token`, `order_by`, `state`, and simple
-  filter cases.
+不能照搬：
 
-Tier 2: Ecosystem compatibility.
+- 松散 schema。
+- 共享密码式鉴权。
+- 客户端过重的同步逻辑。
+- 大量二级功能直接混在主页面状态里。
 
-- Generate or maintain an OpenAPI document for the supported subset.
-- Expose an MCP endpoint shaped like Memos' OpenAPI-driven MCP tool catalog.
-- Keep response fields compatible even when FlareMo's internal API is simpler.
-- Add webhooks only after the core API is stable.
+## Cloudflare-native 边界
 
-Tier 3: Full Memos parity.
+FlareMo 首先是一个简单可靠的笔记系统，不是 Cloudflare 全家桶展示项目。
 
-- Not a v1 goal.
-- Full parity would include Connect/gRPC semantics, broad CEL filtering,
-  instance settings, SSO, notifications, webhooks, comments, reactions, admin
-  surfaces, SSE, and edge cases from the Go server.
+v1 核心只需要：
 
-### API Split
+- Workers
+- Workers Static Assets
+- D1
+- Drizzle
+- Wrangler
+- R2：当实现附件和导出时启用
 
-Use two API layers:
+暂不进入 v1 核心：
 
-- `/api/v1/*`: Memos-compatible public ecosystem API.
-- `/api/app/*`: FlareMo-native frontend API, allowed to be simpler and optimized
-  for the Cloudflare UI.
+- KV：只在出现明确缓存或配置需求时使用。
+- Durable Objects：只在实时同步、协作、WebSocket、强一致限流或用户级协调真的需要时使用。
+- Queues / Cron：只在链接预览、导出生成、embedding、清理、定期回顾等异步任务出现时使用。
+- Vectorize：只在实现语义搜索时使用。
+- Workers AI：只在实现 AI 功能时使用。
 
-The Memos-compatible layer should call the same domain services as the native
-layer. Do not maintain two separate business implementations.
+## Memos 兼容策略
 
-### Porting Rule
+兼容不是口号，而是产品能力。
 
-The Memos source tree is a specification and component library, not a runtime
-that can be deployed unchanged.
+### Tier 0：数据兼容
 
-Good to port:
+- 采用 Memos 风格的核心实体：users、memos、memo relations、attachments、shares、settings、personal access tokens。
+- 保留 Memos 资源命名习惯：`memos/{id}`、`users/{id}`、`attachments/{id}`。
+- 保留可映射到 Memos 的 payload/property 结构：tags、title、has_link、has_task_list、has_code、has_incomplete_tasks、location。
+- 提供 Memos 数据导入导出路径。
 
-- SQL schema intent.
-- API request/response field names.
-- Resource naming.
-- Markdown/tag/property extraction semantics.
-- React editor/timeline/search/cache patterns.
-- OpenAPI/MCP catalog shape.
+### Tier 1：REST API 子集兼容
 
-Must rewrite:
+优先实现高价值 `/api/v1` 端点：
 
-- Go server lifecycle.
-- Echo middleware and route registration.
-- `database/sql` driver layer.
-- File server and local filesystem attachment storage.
-- S3 presign background runner.
-- SSE hub and long-lived connection management.
-- Migration runner around local SQLite/Postgres/MySQL.
+- `POST /api/v1/memos`
+- `GET /api/v1/memos`
+- `GET /api/v1/{name=memos/*}`
+- `PATCH /api/v1/{memo.name=memos/*}`
+- `DELETE /api/v1/{name=memos/*}`
+- `PATCH /api/v1/{name=memos/*}/attachments`
+- `GET /api/v1/{name=memos/*}/attachments`
+- `PATCH /api/v1/{name=memos/*}/relations`
+- `GET /api/v1/{name=memos/*}/relations`
+- `POST /api/v1/{parent=memos/*}/shares`
+- `GET /api/v1/shares/{share_id}`
+- `POST /api/v1/attachments`
+- `GET /api/v1/attachments`
+- `GET /api/v1/{name=attachments/*}`
+- `DELETE /api/v1/{name=attachments/*}`
 
-## Suggested V1 Data Model
+同时支持：
 
-Use Memos as the durable shape, with a Cloudflare-friendly smaller scope:
+- Bearer token / personal access token。
+- 常见分页参数：`page_size`、`page_token`。
+- 常见排序参数：`order_by`。
+- 常见状态过滤：`state`。
+- 简单 filter 子集。
+
+### Tier 2：生态兼容
+
+- 为支持的 `/api/v1` 子集维护 OpenAPI 文档。
+- 基于 OpenAPI 暴露 MCP endpoint。
+- 响应字段在支持范围内保持 Memos-compatible。
+- Webhooks 放在核心 API 稳定之后。
+
+### Tier 3：完整 Memos parity
+
+完整 parity 不是 v1 目标。
+
+完整 Memos parity 会牵涉 Connect/gRPC、复杂 CEL filter、instance settings、SSO、notifications、webhooks、comments、reactions、admin surfaces、SSE 以及大量 Go 服务端历史细节。FlareMo 不应为了“完全一致”复制这些复杂度。
+
+## API 分层
+
+FlareMo 有两层 API。
+
+### `/api/v1/*`
+
+Memos-compatible 公开 API。
+
+用于：
+
+- Memos-compatible clients
+- 数据迁移
+- 导入导出
+- 脚本和自动化
+- OpenAPI
+- MCP
+
+### `/api/app/*`
+
+FlareMo 自己的前端 API。
+
+这一层可以更简单、更贴近 Cloudflare 运行时，但必须复用同一套 domain services 和 Drizzle-backed repositories。不能维护两套业务实现。
+
+## 数据模型
+
+D1 是唯一的主数据库，Drizzle schema 是数据库结构事实源。
+
+核心表从 FlareMo 自己的领域模型出发，同时保留到 Memos DTO 的 adapter 路径：
 
 ```sql
 users
@@ -250,7 +218,7 @@ users
   created_at TEXT
   updated_at TEXT
 
-notes
+memos
   id TEXT PRIMARY KEY
   user_id TEXT NOT NULL
   content TEXT NOT NULL
@@ -262,16 +230,16 @@ notes
   created_at TEXT NOT NULL
   updated_at TEXT NOT NULL
 
-note_relations
-  note_id TEXT NOT NULL
-  related_note_id TEXT NOT NULL
+memo_relations
+  memo_id TEXT NOT NULL
+  related_memo_id TEXT NOT NULL
   type TEXT NOT NULL
-  PRIMARY KEY (note_id, related_note_id, type)
+  PRIMARY KEY (memo_id, related_memo_id, type)
 
 attachments
   id TEXT PRIMARY KEY
   user_id TEXT NOT NULL
-  note_id TEXT
+  memo_id TEXT
   r2_key TEXT NOT NULL
   filename TEXT NOT NULL
   content_type TEXT
@@ -282,7 +250,7 @@ attachments
 
 shares
   id TEXT PRIMARY KEY
-  note_id TEXT NOT NULL
+  memo_id TEXT NOT NULL
   user_id TEXT NOT NULL
   token TEXT UNIQUE NOT NULL
   expires_at TEXT
@@ -293,127 +261,113 @@ settings
   key TEXT NOT NULL
   value TEXT NOT NULL
   PRIMARY KEY (user_id, key)
+
+personal_access_tokens
+  id TEXT PRIMARY KEY
+  user_id TEXT NOT NULL
+  token_hash TEXT NOT NULL
+  description TEXT
+  expires_at TEXT
+  created_at TEXT NOT NULL
+  last_used_at TEXT
 ```
 
-Put fast-changing derived metadata in `notes.payload`:
+payload 示例：
 
 ```json
 {
   "tags": ["idea", "work"],
-  "title": "",
-  "hasLink": true,
-  "hasTaskList": false,
-  "hasCode": false,
-  "clientId": "optional-offline-id"
+  "property": {
+    "title": "",
+    "has_link": true,
+    "has_task_list": false,
+    "has_code": false,
+    "has_incomplete_tasks": false
+  },
+  "location": null,
+  "client_id": "optional-offline-id"
 }
 ```
 
-Add normalized `tags` and `note_tags` only when tag management needs hierarchy,
-aliases, colors, or per-tag settings.
+设计原则：
 
-## API Shape
+- `content`、`visibility`、`status`、`pinned`、`created_at`、`updated_at` 是列。
+- 附件二进制不进 D1，只在 D1 存 R2 key 和元数据。
+- 向量库或 AI 知识库只存派生索引，不能存权威笔记。
+- 语义搜索返回后必须回 D1 读取权威 memo。
 
-Keep the native API small and typed:
+## 前端方向
 
-- `GET /api/notes?cursor=&q=&tag=&visibility=&status=`
-- `POST /api/notes`
-- `GET /api/notes/:id`
-- `PATCH /api/notes/:id`
-- `DELETE /api/notes/:id` as soft archive/recycle first.
-- `POST /api/notes/:id/attachments/presign` or direct Worker upload endpoint.
-- `POST /api/shares`
-- `GET /api/shares/:token`
-- `GET /api/stats/activity`
-- `GET/PATCH /api/settings/:key`
+FlareMo 的前端以 Flomo 式快速收集为中心，不做重后台感。
 
-Use zod or similar validation at the Worker boundary. Use D1 prepared
-statements, not string-built SQL.
+第一屏应该是：
 
-For the Memos-compatible API, preserve Memos field names even when internal
-tables use shorter names. Example: internal `created_at` maps to Memos
-`create_time`; internal `status` maps to Memos `state`.
+- 快速输入框
+- 时间线
+- 搜索
+- 标签
+- 基础统计或 activity calendar
 
-## Frontend Direction
+后续再增加：
 
-The UI should take the product center from Flomo/Memos, not from a dashboard:
+- 反链
+- 附件
+- 分享
+- 导入导出
+- 每日/每周回顾
+- 语义搜索
+- 问我的笔记
 
-- First screen is capture + timeline.
-- Capture box stays always available.
-- Timeline cards are calm, readable, and fast to scan.
-- Left rail: search, tags, shortcuts, activity stats.
-- Right/detail panel later: backlinks, note metadata, shares, attachment info.
-- Mobile: bottom or top compact nav, capture remains one tap away.
+避免：
 
-Borrow:
+- 把首页做成管理后台。
+- 一上来引入社交、评论、通知等复杂面。
+- 音乐、背景图等装饰功能进入核心路径。
+- AI 功能早于基础记录体验。
 
-- MeowNocode: quick input, heatmap, daily review, canvas as optional later mode.
-- Memos: editor decomposition, memo filters, React Query cache model, markdown
-  rendering, activity calendar.
-- Blinko: references UI, attachment handling, AI query entry point.
+## AI 和语义搜索路线
 
-Avoid:
+v1 不把 AI 放进主路径。
 
-- Music/background decoration as core UX.
-- Too many cards inside cards.
-- Turning v1 into a social/collaboration platform.
-- Shipping AI features before the capture/search loop is excellent.
+v1：
 
-## AI/Search Roadmap
+- D1 普通搜索。
+- 标签过滤。
+- 时间线和导入导出。
+- Memos-compatible API 子集。
 
-V1:
+v1.5：
 
-- Plain full-text-ish search using D1 `LIKE` plus tag/date filters.
-- Extract tags and computed flags on write.
+- R2 附件。
+- 链接预览。
+- Vectorize semantic index。
+- 后台 embedding job。
 
-V1.5:
+v2：
 
-- Add a `note_embeddings` metadata table and Vectorize index.
-- Queue embedding jobs on note create/update.
-- Search flow: normal text search first, optional AI semantic search button.
+- 问我的笔记。
+- 每日/每周回顾。
+- 相关笔记推荐。
+- 附件文本抽取。
+- AI 标签建议。
 
-V2:
+## 实施顺序
 
-- Ask-your-notes chat.
-- Attachment extraction for PDF/doc/text.
-- Daily/weekly review generation.
-- Suggested tags and related notes.
+1. 建立 monorepo 和 Workers + Vite + Hono + D1 + Drizzle 基础。
+2. 定义 Drizzle schema 和 D1 migrations。
+3. 建立 domain services：users、memos、attachments、relations、shares、settings、tokens。
+4. 实现 `/api/v1` Memos-compatible 核心 memo endpoints。
+5. 实现 Flomo-like capture + timeline + search + tags。
+6. 实现 Memos 导入导出。
+7. 接入 R2 附件和导出包。
+8. 维护 OpenAPI。
+9. 基于 OpenAPI 增加 MCP。
+10. 在基础体验稳定后加入 Vectorize 和 AI 能力。
 
-Blinko is the best conceptual reference for this, but its concrete
-implementation assumes a heavier runtime.
+## 结论
 
-## Initial Implementation Recommendation
+FlareMo 的架构核心是：
 
-Start from a Memos-first Cloudflare port, not a neutral scratch app:
+**Memos-compatible API + FlareMo-native internal model + Cloudflare Workers runtime + D1/Drizzle source of truth。**
 
-1. Copy the Memos-compatible schema intent into D1 migrations.
-2. Define a small domain service layer around users, memos, attachments,
-   relations, shares, tokens, and settings.
-3. Implement `/api/v1` Memos-compatible endpoints first for notes and
-   attachments.
-4. Implement `/api/app` only where the FlareMo frontend needs a simpler or
-   more efficient shape.
-5. Build a Flomo-like capture + timeline + search + tag frontend on top of the
-   same service layer.
-6. Add import/export for Memos data early.
-7. Add R2 attachment storage.
-8. Generate or maintain OpenAPI for the supported `/api/v1` subset.
-9. Add MCP from that OpenAPI subset.
-10. Add AI/Vectorize after the core Memos-compatible surface is stable.
-
-The best reference weighting:
-
-- Ecosystem/API/model: Memos.
-- Product feel: Flomo-like, using selected Memos frontend discipline.
-- Cloudflare deployment baseline: MeowNocode, but corrected and hardened.
-- AI/RAG future: Blinko plus Memos-compatible extension points.
-
-## Open Decisions
-
-- Authentication: Cloudflare Access, email magic link, GitHub OAuth, or custom
-  session. For a public product, do not use the MeowNocode shared password gate.
-- Single-user vs multi-user: design the schema as multi-user now even if the
-  first deployment is personal.
-- License posture: avoid copying Blinko source unless GPL-3.0 compatibility is
-  accepted.
-- Whether to use Workers Static Assets only, or Pages + Functions. Worker-first
-  is cleaner for one deployable unit.
+对外吃 Memos 生态，对内保持干净，不复制 Memos 的历史包袱，也不为了凑技术栈而引入 Cloudflare 全家桶。
