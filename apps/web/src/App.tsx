@@ -98,7 +98,7 @@ function FlareMoApp() {
       return memo;
     },
     onSuccess: () => {
-      toast.success("Memo saved");
+      toast.success("Saved");
       void invalidateMemos();
       void invalidateAttachments();
     },
@@ -117,7 +117,7 @@ function FlareMoApp() {
   const restoreMutation = useMutation({
     mutationFn: (id: string) => updateMemo(id, { status: "normal" }),
     onSuccess: () => {
-      toast.success("Memo restored");
+      toast.success("Restored");
       void invalidateMemos();
     },
     onError: handleMutationError,
@@ -126,7 +126,7 @@ function FlareMoApp() {
   const updateMutation = useMutation({
     mutationFn: ({ id, input }: { id: string; input: Parameters<typeof updateMemo>[1] }) => updateMemo(id, input),
     onSuccess: () => {
-      toast.success("Memo updated");
+      toast.success("Updated");
       void invalidateMemos();
     },
     onError: handleMutationError,
@@ -135,7 +135,7 @@ function FlareMoApp() {
   const hardDeleteMutation = useMutation({
     mutationFn: hardDeleteMemo,
     onSuccess: () => {
-      toast.success("Memo deleted");
+      toast.success("Deleted");
       void invalidateMemos();
       void invalidateAttachments();
     },
@@ -154,7 +154,7 @@ function FlareMoApp() {
   const importMutation = useMutation({
     mutationFn: importData,
     onSuccess: (result) => {
-      toast.success(`Imported ${result.imported_memos} memos`);
+      toast.success(`Imported ${result.imported_memos} items`);
       void invalidateMemos();
       void invalidateAttachments();
     },
@@ -189,7 +189,6 @@ function FlareMoApp() {
                 <SidebarTrigger />
                 <div className="min-w-0 flex-1">
                   <div className="truncate font-heading text-base font-semibold">Timeline</div>
-                  <div className="truncate text-xs text-muted-foreground">Memos-compatible, Cloudflare-native</div>
                 </div>
                 <Button
                   aria-label="Export data"
@@ -229,7 +228,7 @@ function FlareMoApp() {
                   <SearchIcon className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground" />
                   <Input
                     className="pl-8"
-                    placeholder="Search memos"
+                    placeholder="Search"
                     value={query}
                     onChange={(event) => setQuery(event.target.value)}
                   />
@@ -241,7 +240,7 @@ function FlareMoApp() {
                 <SearchIcon className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground" />
                 <Input
                   className="pl-8"
-                  placeholder="Search memos"
+                  placeholder="Search"
                   value={query}
                   onChange={(event) => setQuery(event.target.value)}
                 />
@@ -308,7 +307,7 @@ function PublicSharePage() {
       <main className="mx-auto flex w-full max-w-2xl flex-col gap-4">
         <header className="border-b pb-4">
           <div className="font-heading text-lg font-semibold">FlareMo</div>
-          <div className="text-sm text-muted-foreground">Shared memo</div>
+          <div className="text-sm text-muted-foreground">Shared</div>
         </header>
         {shareQuery.isLoading && <div className="rounded-md border p-6 text-sm text-muted-foreground">Loading...</div>}
         {shareQuery.isError && <div className="rounded-md border p-6 text-sm text-muted-foreground">Share not found.</div>}

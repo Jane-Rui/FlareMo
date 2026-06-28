@@ -48,8 +48,8 @@ export function MemoList({
           <EmptyMedia variant="icon">
             <InboxIcon />
           </EmptyMedia>
-          <EmptyTitle>No memos here</EmptyTitle>
-          <EmptyDescription>Capture something above or adjust the current filters.</EmptyDescription>
+          <EmptyTitle>Nothing here</EmptyTitle>
+          <EmptyDescription>No entries match this view.</EmptyDescription>
         </EmptyHeader>
       </Empty>
     );

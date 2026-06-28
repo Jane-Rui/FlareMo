@@ -41,7 +41,6 @@ export function FlareMoSidebar({
       <SidebarHeader className="border-b">
         <div className="flex min-w-0 flex-col gap-1 px-2 py-1">
           <div className="truncate font-heading text-lg font-semibold">FlareMo</div>
-          <div className="truncate text-xs text-muted-foreground">Cloudflare native memo space</div>
         </div>
       </SidebarHeader>
       <SidebarContent>

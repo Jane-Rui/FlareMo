@@ -2,14 +2,7 @@ import type { Attachment, Memo, MemoState, MemoVisibility, Share } from "@/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -76,7 +69,7 @@ export function MemoCard({
         <CardAction>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button aria-label="Memo actions" size="icon-sm" variant="ghost">
+              <Button aria-label="Actions" size="icon-sm" variant="ghost">
                 <MoreHorizontalIcon />
               </Button>
             </DropdownMenuTrigger>
@@ -159,8 +152,7 @@ export function MemoCard({
       <Dialog open={isEditing} onOpenChange={setIsEditing}>
         <DialogContent className="sm:max-w-lg">
           <DialogHeader>
-            <DialogTitle>Edit memo</DialogTitle>
-            <DialogDescription>Update the memo content and visibility.</DialogDescription>
+            <DialogTitle>Edit</DialogTitle>
           </DialogHeader>
           <Textarea
             className="min-h-40 resize-none text-base"

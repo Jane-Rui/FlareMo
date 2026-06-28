@@ -32,10 +32,10 @@ export function MemoComposer({ isPending, onSubmit }: MemoComposerProps) {
     <Card>
       <CardContent>
         <Textarea
-          aria-label="New memo"
+          aria-label="New entry"
           className="min-h-28 resize-none border-0 px-0 text-base shadow-none focus-visible:ring-0"
           disabled={isPending}
-          placeholder="Capture a thought, paste a link, or tag it with #idea..."
+          placeholder="Write..."
           value={content}
           onChange={(event) => setContent(event.target.value)}
           onKeyDown={(event) => {
