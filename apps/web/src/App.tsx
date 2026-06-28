@@ -27,7 +27,7 @@ import { useI18n, type TranslationKey } from "@/i18n";
 import { extractTags, formatMemoTime, getAllTags } from "@/lib/memo";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createRootRoute, createRoute, createRouter, Outlet, RouterProvider } from "@tanstack/react-router";
-import { ChevronDownIcon, DownloadIcon, FileIcon, LanguagesIcon, MenuIcon, SearchIcon, UploadIcon } from "lucide-react";
+import { DownloadIcon, FileIcon, LanguagesIcon, MenuIcon, SearchIcon, UploadIcon } from "lucide-react";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 
@@ -263,12 +263,13 @@ function FlareMoApp() {
                 </Sheet>
                 <div className="flex min-w-0 flex-1 items-center gap-1.5">
                   <span className="hidden text-muted-foreground sm:inline">/</span>
-                  <button className="inline-flex min-w-0 items-center gap-1 rounded-md px-1.5 py-1 text-sm font-semibold hover:bg-muted" type="button">
-                    <span className="truncate">{viewTitle(view, t)}</span>
-                    <ChevronDownIcon />
-                  </button>
+                  <div className="truncate px-1.5 py-1 text-sm font-semibold">{viewTitle(view, t)}</div>
                   {activeTag && (
-                    <button className="truncate rounded-md px-1.5 py-1 text-sm text-muted-foreground hover:bg-muted" type="button" onClick={() => setActiveTag(undefined)}>
+                    <button
+                      className="truncate rounded-md px-1.5 py-1 text-sm text-muted-foreground motion-safe:transition-colors hover:bg-muted"
+                      type="button"
+                      onClick={() => setActiveTag(undefined)}
+                    >
                       #{activeTag}
                     </button>
                   )}
@@ -277,7 +278,7 @@ function FlareMoApp() {
                   <SearchIcon className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
                   <Input
                     className="h-9 rounded-xl border-0 bg-muted pl-9 shadow-none focus-visible:ring-1"
-                    placeholder="⌘+K"
+                    placeholder={t("common.search")}
                     value={query}
                     onChange={(event) => setQuery(event.target.value)}
                   />
@@ -285,7 +286,7 @@ function FlareMoApp() {
               </div>
             </header>
             <main className="mx-auto min-h-0 w-full max-w-[640px] flex-1 overflow-y-auto px-5 pb-8 lg:px-3">
-              <div className="mb-3 md:hidden">
+              <div className="mb-3 md:hidden motion-safe:animate-[flaremo-rise_160ms_ease-out_both]">
                 <div className="relative">
                   <SearchIcon className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
                   <Input
@@ -311,14 +312,18 @@ function FlareMoApp() {
                   />
                 )}
                 {(activeTag || query.trim()) && (
-                  <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                  <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground motion-safe:animate-[flaremo-rise_140ms_ease-out_both]">
                     {activeTag && (
-                      <button className="rounded-md bg-muted px-2 py-1" type="button" onClick={() => setActiveTag(undefined)}>
+                      <button
+                        className="rounded-md bg-muted px-2 py-1 motion-safe:transition-colors hover:text-foreground"
+                        type="button"
+                        onClick={() => setActiveTag(undefined)}
+                      >
                         #{activeTag}
                       </button>
                     )}
                     <button
-                      className="rounded-md px-2 py-1 hover:bg-muted hover:text-foreground"
+                      className="rounded-md px-2 py-1 motion-safe:transition-colors hover:bg-muted hover:text-foreground"
                       type="button"
                       onClick={() => {
                         setActiveTag(undefined);

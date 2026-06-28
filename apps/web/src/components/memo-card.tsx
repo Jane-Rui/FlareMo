@@ -68,7 +68,7 @@ export function MemoCard({
   return (
     <article
       className={cn(
-        "group relative flex w-full flex-col gap-2 rounded-lg bg-background px-1 py-4 text-card-foreground transition-colors",
+        "group relative flex w-full flex-col gap-2 rounded-lg bg-background px-1 py-4 text-card-foreground motion-safe:animate-[flaremo-rise_180ms_ease-out_both] motion-safe:transition-[background-color,transform] motion-safe:duration-150 hover:bg-card motion-safe:hover:-translate-y-px",
         memo.pinned && "border-l-2 border-l-primary pl-3",
       )}
     >
@@ -87,7 +87,7 @@ export function MemoCard({
             <DropdownMenuTrigger asChild>
               <Button
                 aria-label={t("common.actions")}
-                className="opacity-100 md:opacity-0 md:group-hover:opacity-100"
+                className="opacity-100 motion-safe:transition-opacity md:opacity-0 md:group-hover:opacity-100"
                 size="icon-sm"
                 variant="ghost"
               >
@@ -140,7 +140,7 @@ export function MemoCard({
           <div className="mt-3 flex flex-col gap-2">
             {attachments.map((attachment) => (
               <a
-                className="flex items-center gap-2 rounded-md bg-muted px-3 py-2 text-sm text-muted-foreground hover:text-foreground"
+                className="flex items-center gap-2 rounded-md bg-muted px-3 py-2 text-sm text-muted-foreground motion-safe:transition-[color,background-color] hover:text-foreground"
                 href={attachment.download_url}
                 key={attachment.name}
               >

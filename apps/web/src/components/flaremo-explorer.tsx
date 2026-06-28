@@ -1,21 +1,9 @@
 import type { Memo } from "@/api";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { useI18n } from "@/i18n";
 import { extractTags } from "@/lib/memo";
 import { cn } from "@/lib/utils";
-import {
-  ArchiveIcon,
-  BotIcon,
-  CalendarDaysIcon,
-  HashIcon,
-  InboxIcon,
-  MessageCircleIcon,
-  RefreshCcwIcon,
-  RouteIcon,
-  SparklesIcon,
-  Trash2Icon,
-} from "lucide-react";
+import { ArchiveIcon, HashIcon, InboxIcon, Trash2Icon } from "lucide-react";
 import type { ReactNode } from "react";
 
 export type ExplorerView = "all" | "archived" | "trashed";
@@ -53,29 +41,19 @@ export function FlareMoExplorer({
     { count: archivedCount, icon: ArchiveIcon, label: t("view.archive"), view: "archived" as const },
     { count: trashedCount, icon: Trash2Icon, label: t("view.trash"), view: "trashed" as const },
   ];
-  const featureItems = [
-    { icon: MessageCircleIcon, label: t("sidebar.wechatInput") },
-    { icon: CalendarDaysIcon, label: t("sidebar.dailyReview") },
-    { icon: SparklesIcon, label: t("sidebar.aiInsight") },
-    { icon: BotIcon, label: t("sidebar.agent") },
-    { icon: RouteIcon, label: t("sidebar.randomWalk") },
-  ];
 
   return (
     <aside className="flex min-h-full flex-col px-3 py-4 text-sm">
-      <header className="mb-5 flex items-center justify-between gap-2 px-1">
+      <header className="mb-5 flex items-center gap-2 px-1">
         <div className="flex min-w-0 items-center gap-2">
           <div className="flex size-7 shrink-0 items-center justify-center rounded-md bg-foreground text-xs font-semibold text-background">
             F
           </div>
           <div className="truncate font-heading text-sm font-semibold">FlareMo</div>
         </div>
-        <Button aria-label={t("sidebar.sync")} size="icon-sm" variant="ghost">
-          <RefreshCcwIcon />
-        </Button>
       </header>
 
-      <section className="mb-4 grid grid-cols-3 gap-2 px-1">
+      <section className="mb-4 grid grid-cols-3 gap-2 px-1 motion-safe:animate-[flaremo-rise_180ms_ease-out_both]">
         <StatCell label={t("explorer.records")} value={stats.total} />
         <StatCell label={t("explorer.tags")} value={stats.tags} />
         <StatCell label={t("explorer.days")} value={stats.days} />
@@ -84,11 +62,15 @@ export function FlareMoExplorer({
       <section className="mb-5 px-1">
         <div className="grid grid-cols-12 gap-1">
           {activity.map((day) => (
-            <button
+            <div
               aria-label={t("explorer.heatmapDay", { count: day.count, date: day.date })}
-              className={cn("aspect-square rounded-[3px] transition-opacity hover:opacity-80", heatmapColor(day.count))}
+              className={cn(
+                "aspect-square rounded-[3px] motion-safe:transition-[opacity,transform] motion-safe:duration-150 hover:opacity-85 motion-safe:hover:scale-110",
+                heatmapColor(day.count),
+              )}
               key={day.date}
-              type="button"
+              role="img"
+              title={t("explorer.heatmapDay", { count: day.count, date: day.date })}
             />
           ))}
         </div>
@@ -103,10 +85,10 @@ export function FlareMoExplorer({
         {navItems.map((item) => (
           <button
             className={cn(
-              "flex h-9 items-center gap-3 rounded-md px-2 text-left transition-colors",
+              "flex h-9 items-center gap-3 rounded-md px-2 text-left motion-safe:transition-[background-color,color,transform] motion-safe:duration-150",
               activeView === item.view
                 ? "bg-primary text-primary-foreground"
-                : "text-foreground hover:bg-muted",
+                : "text-foreground hover:bg-muted motion-safe:hover:translate-x-0.5",
             )}
             key={item.view}
             type="button"
@@ -115,16 +97,6 @@ export function FlareMoExplorer({
             <item.icon />
             <span className="min-w-0 flex-1 truncate">{item.label}</span>
             <span className="text-xs tabular-nums opacity-70">{item.count}</span>
-          </button>
-        ))}
-        {featureItems.map((item) => (
-          <button
-            className="flex h-9 items-center gap-3 rounded-md px-2 text-left text-foreground transition-colors hover:bg-muted"
-            key={item.label}
-            type="button"
-          >
-            <item.icon />
-            <span className="min-w-0 flex-1 truncate">{item.label}</span>
           </button>
         ))}
       </nav>
@@ -139,8 +111,10 @@ export function FlareMoExplorer({
               return (
                 <button
                   className={cn(
-                    "inline-flex max-w-full items-center gap-1 rounded-md px-2 py-1 text-xs transition-colors",
-                    active ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground hover:text-foreground",
+                    "inline-flex max-w-full items-center gap-1 rounded-md px-2 py-1 text-xs motion-safe:transition-[background-color,color,transform] motion-safe:duration-150",
+                    active
+                      ? "bg-primary text-primary-foreground"
+                      : "bg-muted text-muted-foreground hover:text-foreground motion-safe:hover:-translate-y-px",
                   )}
                   key={tag}
                   type="button"

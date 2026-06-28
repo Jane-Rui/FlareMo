@@ -4,7 +4,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { useI18n } from "@/i18n";
 import { extractTags } from "@/lib/memo";
-import { AtSignIcon, HashIcon, ImageIcon, ListIcon, Loader2Icon, PaperclipIcon, SendIcon, XIcon } from "lucide-react";
+import { HashIcon, ImageIcon, ListIcon, Loader2Icon, PaperclipIcon, SendIcon, XIcon } from "lucide-react";
 import { useState, type ChangeEvent, type Dispatch, type SetStateAction } from "react";
 
 type MemoComposerProps = {
@@ -31,7 +31,7 @@ export function MemoComposer({ isPending, onSubmit }: MemoComposerProps) {
   };
 
   return (
-    <section className="group relative flex w-full flex-col rounded-xl border border-border bg-card shadow-sm focus-within:border-primary focus-within:ring-1 focus-within:ring-primary/30">
+    <section className="group relative flex w-full flex-col rounded-xl border border-border bg-card shadow-sm motion-safe:animate-[flaremo-rise_180ms_ease-out_both] motion-safe:transition-[border-color,box-shadow,transform] motion-safe:duration-200 focus-within:border-primary focus-within:ring-1 focus-within:ring-primary/30 focus-within:motion-safe:-translate-y-px">
       <Textarea
         aria-label={t("composer.ariaLabel")}
         className="min-h-32 resize-none rounded-t-xl border-0 px-4 pt-4 pb-2 text-[15px] leading-7 shadow-none focus-visible:ring-0"
@@ -80,14 +80,8 @@ export function MemoComposer({ isPending, onSubmit }: MemoComposerProps) {
             </label>
           </Button>
           <div className="hidden h-4 w-px bg-border sm:block" />
-          <Button aria-label={t("composer.formatText")} size="icon-sm" type="button" variant="ghost">
-            <span className="text-sm font-medium">Aa</span>
-          </Button>
           <Button aria-label={t("composer.bulletList")} size="icon-sm" type="button" variant="ghost" onClick={() => appendText("- ")}>
             <ListIcon />
-          </Button>
-          <Button aria-label={t("composer.mention")} size="icon-sm" type="button" variant="ghost" onClick={() => appendText("@")}>
-            <AtSignIcon />
           </Button>
         </div>
         <div className="flex items-center gap-2">

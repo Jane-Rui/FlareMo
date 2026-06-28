@@ -38,7 +38,7 @@ export function MemoList({
 
   if (isLoading && !hasError) {
     return (
-      <div className="flex flex-col gap-4 pt-2">
+      <div className="flex flex-col gap-4 pt-2 motion-safe:animate-[flaremo-fade_160ms_ease-out_both]">
         <Skeleton className="h-20 rounded-lg" />
         <Skeleton className="h-16 rounded-lg" />
         <Skeleton className="h-24 rounded-lg" />
@@ -48,7 +48,7 @@ export function MemoList({
 
   if (memos.length === 0) {
     return (
-      <Empty className="min-h-64 text-muted-foreground">
+      <Empty className="min-h-64 text-muted-foreground motion-safe:animate-[flaremo-rise_180ms_ease-out_both]">
         <EmptyHeader>
           <EmptyMedia variant="icon">
             <InboxIcon />
@@ -61,7 +61,7 @@ export function MemoList({
   }
 
   return (
-    <div className="flex flex-col divide-y">
+    <div className="flex flex-col divide-y motion-safe:animate-[flaremo-fade_160ms_ease-out_both]">
       {memos.map((memo) => (
         <MemoListItem
           attachments={attachmentsByMemo.get(memo.name) ?? []}
