@@ -18,7 +18,7 @@
     {
       "binding": "DB",
       "database_name": "flaremo",
-      "database_id": "5a5094d8-efcc-4aef-909b-c8455358247d",
+      "database_id": "922c1868-681a-4094-b630-9dea542f4f33",
       "migrations_dir": "./migrations"
     }
   ],
@@ -27,6 +27,9 @@
       "binding": "ATTACHMENTS",
       "bucket_name": "flaremo-attachments"
     }
+  ],
+  "routes": [
+    { "pattern": "flaremo.48kr.top/*", "zone_name": "48kr.top" }
   ],
   "vars": {
     "FLAREMO_SINGLE_USER_EMAIL": "owner@flaremo.local",
