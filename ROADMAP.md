@@ -7,7 +7,7 @@
 - 快速记录：打开即写、低干扰输入、可靠草稿。
 - 安静时间线：搜索、标签、归档、回收站、活动热力图。
 - Memos 兼容：核心 `/api/v1` 子集稳定，导入导出可靠。
-- Cloudflare 原生部署：一键部署、D1/R2 自动 provision、Access 保护、Agent runbook。
+- Cloudflare 原生部署：一键部署、D1/R2 自动 provision、Access 保护、可审查的升级 PR、Agent runbook。
 - 个人知识管理：引用关系、附件、公开分享、语义检索和 AI 工作流。
 
 ## 工程主线
@@ -17,17 +17,16 @@
 - `/api/v1/*` 和 `/api/app/*` 复用同一套 domain services。
 - 每个公开 API 都有测试。
 - 每个 release 都有 tag、CHANGELOG、migration notes 和升级说明。
-- 不使用 GitHub Actions 作为 CI；维护者发布前本地跑 `pnpm verify` 和 `pnpm deploy:dry-run`。
+- 不使用 GitHub Actions 作为项目 CI 或生产部署器；维护者发布前本地跑 `pnpm verify` 和 `pnpm deploy:dry-run`。用户部署仓库只用受限 workflow 准备上游升级 PR。
 
 ## 公开任务池
 
-- 补浏览器 E2E 测试：创建、编辑、附件、分享、移动端。
-- 扩大 Memos 兼容测试矩阵。
-- 补客户端兼容性文档。
+- 扩大真实 Memos 客户端兼容矩阵，并补每个已验证客户端的配置示例。
 - 增加语义搜索：按 `docs/semantic-search.md` 实现；D1 仍是事实源，Vectorize 只存派生索引。
 - 增加 AI 回顾：Workers AI 或外部模型只做派生能力。
-- 改进导入导出：大文件导入、冲突处理、导出包校验。
-- 增加备份/恢复文档：D1 dump、R2 对象恢复、release 回滚。
+- 为超过内联上限的大型导入导出增加异步对象包和校验清单。
+- 增加附件生命周期观测面：清理计数、缺失对象报告和可控重试。
+- 扩大浏览器 E2E：Markdown、历史恢复、反向链接、分享撤销和附件预览。
 
 ## 不做
 

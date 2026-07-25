@@ -4,7 +4,7 @@ FlareMo 部署到 Cloudflare Workers。Worker 同时承载前端静态资源和 
 
 ## 一键部署
 
-点击按钮会让 Cloudflare 从当前仓库创建一份新仓库，读取 `wrangler.jsonc`，自动创建需要的 D1 和 R2 资源，并配置 Workers Builds。
+点击按钮会让 Cloudflare 从当前仓库创建一份新仓库，读取 `wrangler.jsonc`，自动创建需要的 D1 和 R2 资源，并配置 Workers Builds。把 `FLAREMO_DEPLOY_REPOSITORY` 填成这个新仓库的 `owner/repository`，应用内的系统更新入口就能打开对应 workflow。
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/realchendahuang/FlareMo)
 
@@ -12,14 +12,20 @@ FlareMo 部署到 Cloudflare Workers。Worker 同时承载前端静态资源和 
 
 如果 Cloudflare Dashboard 还没有连接 GitHub 或 GitLab provider，创建页会先提示 `Connect a Git account to continue.`。这是 Cloudflare Workers Builds 的 Git 集成前置条件。
 
-一键部署完成后还要做两件事：
+如果已有 GitHub 连接已经过期，Cloudflare 会在设置仓库时返回类似：
+
+```text
+HTTP 400
+Your GitHub authorization has expired. Please reauthorize your GitHub connection by reinstalling the Cloudflare GitHub App.
+```
+
+这时按顺序操作：先在 GitHub 卸载旧的 `Cloudflare Workers and Pages` App，再回到 Deploy Button 表单选择 `新建 GitHub 连接`，最后在带 Cloudflare `state` 参数的 GitHub 页面选择 `Install & Authorize`。不要先从 GitHub App 页面直接安装；无 `state` 的安装不会建立当前 Cloudflare 表单所需的 Git 账号连接。GitHub 可能要求 sudo/passkey、GitHub Mobile、authenticator app 或邮箱验证码；这是 GitHub 账号侧的安全验证，不是 FlareMo 代码问题。
+
+一键部署完成后还要做一件事：
 
 - 在 Cloudflare Access 里保护 Worker 域名或自定义域名。
-- 对远端 D1 执行 migrations。
 
-```bash
-pnpm migrate:remote
-```
+Deploy Button 使用的 `pnpm deploy` 会自动应用尚未执行的 D1 migrations。测试 Deploy Button 时仍要确认生成仓库里的 `wrangler.jsonc` 指向新建的测试 D1，而不是已有生产库。
 
 ## 手动部署
 
@@ -38,13 +44,7 @@ pnpm exec wrangler r2 bucket create flaremo-attachments
 
 把 D1 输出的 `database_id` 写到 `wrangler.jsonc`。
 
-应用远端 migrations：
-
-```bash
-pnpm migrate:remote
-```
-
-部署：
+部署；这个命令会先构建前端、应用远端 migrations，再发布 Worker：
 
 ```bash
 pnpm deploy
@@ -212,13 +212,9 @@ http://localhost:8787
 
 ## 升级
 
-升级前先看 `CHANGELOG.md` 和 release notes。只要 release notes 里提到 database migration，就先执行：
+应用内左下角的“系统更新”会显示当前版本和最新稳定版本。GitHub 部署可以按 [更新指南](./update.md) 运行更新 workflow、审查升级 PR，并在合并后交给 Workers Builds 自动部署。
 
-```bash
-pnpm migrate:remote
-```
-
-再执行：
+手工升级前先看 `CHANGELOG.md` 和 release notes，然后执行：
 
 ```bash
 pnpm deploy

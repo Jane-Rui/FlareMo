@@ -20,14 +20,19 @@ FlareMo 兼容 Memos 生态，但不复制 Memos 服务端实现。兼容目标�
 | 状态过滤 | 支持 | normal、archived、trashed。 |
 | 分页 | 支持 | `page_size`、`page_token`。 |
 | 排序 | 支持 | `order_by` 子集。 |
-| 附件上传 | 支持 | `POST /api/v1/attachments`。 |
+| 全文搜索 | 支持 | `q` 使用 D1 FTS5，并在需要时回退到安全模糊匹配；支持 `has:attachment`、`is:pinned`、日期和 `in:` 筛选。 |
+| 附件上传 | 支持 | `POST /api/v1/attachments`；可选 `client_id` 让离线重试幂等。 |
 | memo 绑定附件 | 支持 | `PATCH /api/v1/{name=memos/*}/attachments`。 |
 | 附件下载 | 支持 | `GET /api/v1/{name=attachments/*}/blob`。 |
+| Range / 内联预览 | 支持 | 单段 byte range、ETag 和受控 inline disposition。 |
 | memo relations | 支持 | `GET/PATCH /api/v1/{name=memos/*}/relations`。 |
-| 分享 | 支持 | `POST /api/v1/{parent=memos/*}/shares`。 |
+| relation context / backlinks | 支持 | `GET /api/v1/memos/{id}/relation-context`。 |
+| memo 完整上下文 | 支持 | `GET /api/v1/memos/{id}/context`。 |
+| 历史版本 | 支持 | 列出并恢复 memo revisions。 |
+| 分享 | 支持 | 列出/创建 memo 分享，并通过 `DELETE /api/v1/shares/{share_id}` 撤销。 |
 | 公开分享读取 | 支持 | `GET /api/public/shares/{token}`。 |
 | 导出 | 支持 | `GET /api/v1/export`。 |
-| 导入 | 支持 | `POST /api/v1/import`。 |
+| 导入 | 支持 | `POST /api/v1/import`，支持 `duplicate`、`skip`、`overwrite`。 |
 | OpenAPI | 支持 | `GET /openapi.json`。 |
 | MCP | 支持 | `POST /api/v1/mcp`。 |
 

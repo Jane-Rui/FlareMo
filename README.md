@@ -80,10 +80,12 @@ FlareMo 想回答另一个问题：**能不能只用一个免费 Cloudflare 账�
 
 - 快速记录笔记，支持标签和附件。
 - 时间线、归档、回收站。
-- 搜索、标签筛选、活动热力图。
-- R2 附件存储。
-- 公开分享链接。
-- Memos 数据导入导出。
+- D1 FTS5 全文搜索、标签筛选、活动热力图；默认搜索时间线与归档，搜索支持 `has:attachment`、`is:pinned`、`before:YYYY-MM-DD`、`after:YYYY-MM-DD` 和 `in:timeline|archive|trash`。
+- 可安装的 PWA；新建笔记草稿自动保存在本机，离线提交（包括附件）进入本机待同步队列，重新联网后按顺序提交。
+- Markdown/GFM、图片与音频附件预览。
+- 记录详情、引用关系、反向链接和历史版本恢复。
+- 可撤销的公开分享链接。
+- 支持冲突策略的 Memos 数据导入导出。
 - Memos 兼容的 `/api/v1` memo / attachment / share 子集。
 - OpenAPI 输出。
 - MCP 端点。
@@ -99,17 +101,15 @@ FlareMo 的部署被刻意做得很轻。两种方式，挑一种就行。
 
 **方式一：一键部署按钮**
 
-点击上方「Deploy to Cloudflare」按钮，Cloudflare 会读取 `wrangler.jsonc`，自动创建 Worker 并生成 D1 / R2 绑定。部署完成后跑一次远程迁移：
-
-```bash
-pnpm migrate:remote
-```
+点击上方「Deploy to Cloudflare」按钮，Cloudflare 会读取 `wrangler.jsonc`，自动创建 Worker、生成 D1 / R2 绑定并通过部署命令应用 D1 migrations。把 `FLAREMO_DEPLOY_REPOSITORY` 填成 Cloudflare 创建的 GitHub 仓库（例如 `octocat/flaremo`），应用内就能直接打开该仓库的更新 workflow。
 
 如果你的 Cloudflare Dashboard 还没有连接 GitHub 或 GitLab，Cloudflare 会先要求连接 Git provider。这个 OAuth 授权由你在 Cloudflare 页面里确认，FlareMo 不会要求应用内 token。
 
 **方式二：让 AI Agent 替你部署**
 
 仓库里带了一份 [docs/agent-deploy.md](./docs/agent-deploy.md)，是写给 Codex / Claude Code / Cursor 这类 Agent 用的部署 runbook。把仓库交给一个能跑命令的 Agent，它就能按 runbook 创建 D1 / R2 资源、填写 `database_id`、跑迁移、部署。你不用记命令，Agent 自己按步骤来。
+
+需要让 Agent、Telegram 或其他 IM 渠道直接写入笔记时，参考 [Agent 与 IM 渠道写入](./docs/agent-ingestion.md)。仓库提供一个经过测试的独立 Telegram Worker 示例，不会把渠道密钥或平台逻辑塞进 FlareMo 主 Worker。
 
 **手动部署**（想自己一步步来的话）先创建资源：
 
@@ -123,18 +123,17 @@ pnpm exec wrangler r2 bucket create flaremo-attachments
 ```bash
 pnpm verify
 pnpm deploy:dry-run
-pnpm migrate:remote
 pnpm deploy
 ```
 
-完整部署说明见 [docs/deploy.md](./docs/deploy.md)。英文部署说明见 [docs/en/deploy.md](./docs/en/deploy.md)。Deploy Button 的实测记录见 [docs/deploy-button-test.md](./docs/deploy-button-test.md)。
+完整部署说明见 [docs/deploy.md](./docs/deploy.md)，版本更新见 [docs/update.md](./docs/update.md)。英文部署说明见 [docs/en/deploy.md](./docs/en/deploy.md)。Deploy Button 的实测记录见 [docs/deploy-button-test.md](./docs/deploy-button-test.md)。
 
 **部署前检查清单**
 
 - Wrangler 已登录目标 Cloudflare 账号：`pnpm exec wrangler whoami`。
 - `wrangler.jsonc` 里的 D1 binding 是 `DB`，并已填入目标 D1 的 `database_id`。
 - `wrangler.jsonc` 里的 R2 binding 是 `ATTACHMENTS`，目标 bucket 已创建。
-- 远端 D1 migrations 会在首次部署后执行：`pnpm migrate:remote`。
+- `pnpm deploy` 会先应用尚未执行的远端 D1 migrations，再发布 Worker。
 - Cloudflare Access application 已规划好人类访问、Service Token 和公开分享 bypass。
 - 发布前已跑：`pnpm verify` 和 `pnpm deploy:dry-run`。
 
@@ -223,8 +222,14 @@ FlareMo 保留 Memos 风格的核心实体，目标是复用 Memos 的客户端�
 - `PATCH /api/v1/{name=memos/*}/attachments`
 - `GET /api/v1/{name=memos/*}/relations`
 - `PATCH /api/v1/{name=memos/*}/relations`
+- `GET /api/v1/memos/{id}/relation-context`
+- `GET /api/v1/memos/{id}/context`
+- `GET /api/v1/memos/{id}/revisions`
+- `POST /api/v1/memos/{id}/revisions/restore`
+- `GET /api/v1/{parent=memos/*}/shares`
 - `POST /api/v1/{parent=memos/*}/shares`
 - `GET /api/v1/shares/{share_id}`
+- `DELETE /api/v1/shares/{share_id}`
 - `POST /api/v1/attachments`
 - `GET /api/v1/attachments`
 - `GET /api/v1/{name=attachments/*}`
@@ -270,12 +275,14 @@ FlareMo 当前已经具备：
 
 ## 工程化
 
-项目不使用 GitHub Actions 作为 CI。发布前由维护者在本地执行：
+项目不使用 GitHub Actions 作为 CI 或生产部署器。发布前由维护者在本地执行：
 
 ```bash
 pnpm verify
 pnpm deploy:dry-run
 ```
+
+Deploy Button 创建的用户仓库包含一个最小权限的更新 workflow。它只同步正式 Release 并创建升级 PR；合并后仍由 Cloudflare Workers Builds 负责部署，不需要 Cloudflare API Token。
 
 常用维护命令：
 

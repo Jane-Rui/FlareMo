@@ -2,6 +2,131 @@
 
 FlareMo 使用 SemVer。每个 release 都要写清楚升级影响、Cloudflare 资源变化和 Memos 兼容面变化。
 
+## v0.3.0
+
+自托管更新体验版本。这个版本让 Deploy Button 创建的 GitHub 仓库可以发现上游稳定 Release、准备可审查的升级 PR，并在合并后继续使用 Cloudflare Workers Builds 发布。
+
+### 已包含
+
+- 前端侧栏增加“系统更新”入口，显示当前版本、最新稳定版本、发布日期和 Release notes。
+- `/api/app/health` 增加版本元数据，支持把部署仓库配置为 `FLAREMO_DEPLOY_REPOSITORY`，从应用直接进入该仓库的更新 workflow。
+- 新增 `flaremo-update.yml`：每天或手工检查最新稳定 Release，根据两个 Release 之间的差异在用户部署仓库中创建升级 PR；它不依赖上游提交历史，检测到自定义代码冲突时停止且不覆盖 `main`。
+- `pnpm deploy` 会在 Worker 发布前自动应用远端 D1 migrations，使 Deploy Button 首装和后续 Workers Builds 更新使用同一条部署链路。
+- 增加中英文更新指南，并把 GitHub Actions 例外收窄为用户部署仓库的 Release 同步；它不承担项目 CI，不持有 Cloudflare 凭据，也不直接部署。
+- root、Web、Worker、contracts、db、domain、memos、OpenAPI 和 MCP 版本统一到 `0.3.0`。
+
+### Cloudflare、数据库与兼容影响
+
+- 不新增 D1 migration，不改变 D1、R2、Access、Cron 或 Memos-compatible `/api/v1/*` 行为。
+- 新增普通变量 `FLAREMO_DEPLOY_REPOSITORY`；值为用户部署仓库的 `owner/repository`。留空不影响笔记功能，只会让系统更新入口退回升级指南。
+- 从本版本起 `pnpm deploy` 自动执行 `pnpm migrate:remote`；已有 migration 会由 Wrangler 跟踪，不会重复应用。
+- 更新分支使用 Cloudflare 默认的 non-production `wrangler versions upload` 命令创建 preview；只有合并到 production branch 后的 `pnpm deploy` 才执行远端 migration。
+- GitHub Action 只使用当前部署仓库临时的 `GITHUB_TOKEN` 创建分支和 PR。Cloudflare Workers Builds 仍是唯一生产部署器。
+
+### 升级说明
+
+- v0.2.1 或更早实例需要最后手工升级一次到 v0.3.0。
+- 在生成的部署仓库中启用 Actions 的仓库写入和创建 PR 权限。
+- 把 `FLAREMO_DEPLOY_REPOSITORY` 设置为该 GitHub 仓库，例如 `octocat/flaremo`。
+- 以后可在 FlareMo 的系统更新入口运行更新 workflow，合并生成的 PR 后由 Cloudflare 自动部署。
+- GitLab 部署继续使用手工升级流程。
+
+## v0.2.1
+
+开发工具链安全补丁。这个版本把已经合并到 `main` 的依赖修复纳入正式发布，不改变 v0.2.0 的生产功能、数据模型或 Cloudflare 资源。
+
+### 已修复
+
+- 使用 pnpm parent-scoped override，将 `drizzle-kit` 旧加载器链中的传递依赖从受影响的 `esbuild@0.18.20` 固定到已修复的 `0.25.12`。
+- 重新生成 lockfile，移除旧 esbuild 及其平台二进制包；GitHub Dependabot 未解决告警恢复为 0。
+- 放宽 Miniflare hook 和 Playwright 本地服务器/单测试超时，避免低性能或多任务开发机上的发布门禁被环境启动速度误判为回归。
+- root、Web、Worker、contracts、db、domain、memos、OpenAPI 和 MCP 版本统一到 `0.2.1`。
+
+### Cloudflare、数据库与兼容影响
+
+- 不新增 D1 migration，不改变 D1、R2、Access、Cron 或 Worker 运行逻辑。
+- 不改变 `/api/app/*`、Memos-compatible `/api/v1/*`、OpenAPI 或 MCP 的行为合同。
+- 生产部署可以直接覆盖 v0.2.0，无需调整资源绑定或执行数据库迁移。
+
+### 升级说明
+
+```bash
+pnpm install
+pnpm verify
+pnpm deploy:dry-run
+pnpm deploy
+```
+
+## v0.2.0
+
+完整知识管理与数据可靠性版本。这个版本把搜索、附件、分享、关系、历史版本、导入导出和前端详情页一起补齐，并继续保持 Workers + D1 + R2 + Cloudflare Access 的原生架构。
+
+### 已包含
+
+- 增加 D1 FTS5 全文索引、规范化 `memo_tags` 表、稳定置顶游标分页和 SQL 聚合统计；不适合 FTS 查询语法的输入自动回退到安全模糊匹配。
+- 增加 `memo_revisions`，编辑时保存旧版本，并提供版本列表与恢复接口。
+- 增加 memo 上下文接口，一次返回附件、有效分享、正向关系、反向链接和历史版本；App 侧使用 D1 batch 收敛查询。
+- 分享支持复用、列出和撤销；公开分享继续校验 token、过期时间和 memo 状态，不暴露私有附件。
+- R2 附件增加 25 MiB 限制、ETag、Range、内联预览、安全 Content-Disposition、上传补偿、硬删除清理和每日孤儿清理 Cron。
+- 导入导出升级为 v2，保留时间、来源和关联数据，支持 `duplicate`、`skip`、`overwrite` 冲突策略，并清理被替换或未使用的 R2 对象。
+- 前端增加 Markdown/GFM、安全外链、图片与音频预览、独立 memo 详情路由、关系与反向链接、历史恢复和分享生命周期管理。
+- 搜索、标签和视图状态进入 URL；编辑、归档、恢复和删除使用带回滚的 TanStack Query 乐观缓存更新。
+- OpenAPI、MCP serverInfo、所有 workspace package 版本统一到 `0.2.0`；TypeScript 统一为 5.9，并更新 Workers types、Wrangler 和 Miniflare。
+- Worker 集成测试覆盖全文检索、历史恢复、反向链接、分享撤销、Range、硬删除和计划清理；E2E server 增加强制退出兜底。
+
+### Cloudflare 与数据库影响
+
+- 新增 migration `0002_wooden_professor_monster.sql`：创建 `memo_tags`、`memo_revisions`、FTS5 虚拟表与触发器，并给附件、分享和反向链接补索引及生命周期字段。
+- `wrangler.jsonc` 新增每天 `03:17 UTC` 的 Cron Trigger，用于清理超过 24 小时未绑定或处于删除中的附件。
+- 不新增 D1、R2、KV、Vectorize 或 Workers AI 资源；D1 仍是唯一事实源，R2 仍只保存对象。
+- 生产访问边界仍是 Cloudflare Access；不新增应用内 Bearer token 登录。
+
+### 升级说明
+
+```bash
+pnpm install
+pnpm verify
+pnpm deploy:dry-run
+pnpm migrate:remote
+pnpm deploy
+```
+
+- 必须先完成远端 migration，再让新 Worker 接受写请求。
+- 部署后检查 Cron Trigger 已创建，并抽查全文搜索、附件 Range/预览、公开分享和历史恢复。
+- 大于 32 MiB 的内联导出会返回 `413`；请使用元数据导出并单独备份 R2。
+- 本版本不包含 Vectorize 语义搜索、AI 回顾或平台专用聊天机器人。
+
+## v0.1.5
+
+前端性能、交互可靠性和移动端可用性优化版本。这个版本把列表查询、统计和附件元数据收敛为服务端分页合同，同时补齐失败恢复、危险操作确认和响应式验收。
+
+### 已包含
+
+- 首页从多列表请求和逐条附件查询收敛为当前视图分页请求与独立统计请求，附件元数据随 Memo 批量返回。
+- 增加 `/api/app/stats`，提供状态计数、标签统计、活跃天数和最近 84 天活动数据。
+- 列表改为服务端分页、搜索和精确标签过滤，修复复合游标的稳定排序，并增加“加载更多”交互。
+- 保存和附件上传失败时保留编辑器草稿，并对已上传对象执行补偿清理，避免半成品 Memo 或孤立附件。
+- 永久删除只在回收站提供，并使用确认对话框；移除点击时间戳归档的隐藏交互。
+- 移动端侧栏增加独立滚动区域，确保标签较多或屏幕较短时仍能访问导入、导出入口。
+- 活动热力图按周排列，月份和时区计算改为动态值，并将重复读屏信息收敛为一个摘要。
+- 增加错误、重试和非法导入反馈；优化深色品牌色、滚动条、首屏主题闪烁和长列表渲染。
+- E2E 使用隔离的 `.wrangler-e2e` 数据库，并覆盖请求瀑布、失败草稿、永久删除确认、分页与移动侧栏溢出。
+- Web 类型改为复用 `@flaremo/contracts`，减少前后端合同漂移。
+
+### 约束
+
+- 不新增 Cloudflare 资源。
+- 不新增 D1 migration。
+- 不改变 `/api/v1/*` Memos 兼容 API 合同。
+- 不引入 GitHub Actions。
+- 生产访问边界仍是 Cloudflare Access。
+
+### 升级说明
+
+- 自托管升级按常规流程执行 `pnpm verify`、`pnpm migrate:remote` 和 `pnpm deploy`。
+- 本次没有数据库结构变更，远端 migration 预期为 no-op。
+- 前端会改用新的 `/api/app/stats` 和分页参数，部署时应同时更新 Worker 与静态资源。
+
 ## v0.1.4
 
 开源项目成熟度补强版本。这个版本不改变部署架构，重点是补齐公开协作、双语入口、工程门禁、Memos 生态兼容记录和 GitHub 仓库治理。
