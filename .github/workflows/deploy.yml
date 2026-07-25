@@ -43,11 +43,6 @@ jobs:
       - name: Build web assets
         run: pnpm --filter @flaremo/web build
 
-      - name: Run database migrations
-        run: pnpm migrate:remote
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-
       - name: Deploy to Cloudflare Workers
         uses: cloudflare/wrangler-action@v3
         with:
