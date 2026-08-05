@@ -46,7 +46,7 @@
     "FLAREMO_SINGLE_USER_NAME": "FlareMo Owner",
     // Canonical origin used by Better Auth for callback and cookie checks.
     // Set this to the deployed origin; keep secrets out of this file.
-    "FLAREMO_PUBLIC_URL": "https://flaremo.chendahuang.com",
+    "FLAREMO_PUBLIC_URL": "https://flaremo.48kr.top",
     // Optional comma-separated additional browser origins for trusted clients.
     "FLAREMO_TRUSTED_ORIGINS": ""
   }
