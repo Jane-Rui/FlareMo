@@ -28,14 +28,18 @@ pnpm deploy:dry-run
 pnpm deploy
 ```
 
-## Cloudflare Access
+## Better Auth and optional Cloudflare Access
 
-FlareMo expects production instances to be protected by Cloudflare Access. Do not add an app-level Bearer token, login page, or custom session gateway to FlareMo.
+FlareMo's application authentication is provided by Better Auth. The first deployment uses the one-time `/setup` flow to create the single owner; browsers use an `HttpOnly` cookie session, while scripts, MCP, and Memos-compatible clients use a revocable `memos_pat_` PAT. Cloudflare Access is optional outer policy and never replaces the application session or PAT.
+
+The current release supports username/password login and authenticated password changes. No email provider is configured, so Better Auth's self-service forgot-password email flow remains disabled rather than pretending to work. A completed single-user instance has a separately configured break-glass operator recovery route; it targets the existing owner, revokes sessions and PATs, and must be rotated or removed immediately after use.
+
+The current `/api/v1` wire is the current Memos-style camelCase/protobuf-JSON subset. The legacy snake_case wire is selected explicitly with `X-FlareMo-Wire: legacy`. Better Auth remains the identity source while the current auth facade returns a Memos-style HS256 access JWT and rotates the `memos_refresh` HttpOnly cookie. The release also exposes the bounded social REST subset, UserService webhook/notification resource subset, a bounded D1 outbox for four memo webhook events with retries, Connect JSON/protobuf/gRPC-Web unary subset, heartbeat SSE, and stateless `/mcp` Streamable HTTP subset; complete upstream webhook event/egress semantics, full notification filtering and multi-user ACL, complete Memos Server, protobuf/gRPC, and third-party-client parity are not promised.
 
 Recommended boundary:
 
 - Human access: `Allow` identity policy.
-- Scripts, MCP, and Memos-compatible clients: `Service Auth` policy plus Access Service Token.
+- Scripts, MCP, and Memos-compatible clients: FlareMo `memos_pat_` application token; if Access remains enabled, add a `Service Auth` policy plus Access Service Token.
 - Public shares and static assets: narrowly scoped `Bypass` policies.
 
 ### 1. Create an Access application
@@ -68,7 +72,7 @@ This policy protects the browser UI. Authenticated users receive a Cloudflare Ac
 
 ### 3. Create a Service Token
 
-Scripts, MCP, and Memos-compatible clients usually cannot complete a browser login flow. Use an Access Service Token for those clients.
+Scripts, MCP, and Memos-compatible clients usually cannot complete a browser login flow. Use a FlareMo `memos_pat_` application token for the Worker; if the deployment is behind Access, add an Access Service Token for the outer policy.
 
 In the Cloudflare Dashboard, go to `Zero Trust` -> `Access` -> `Service Auth` -> `Service Tokens`, then create a token such as:
 
@@ -95,12 +99,13 @@ Return to the FlareMo Access application and add a policy:
 | Include | The Service Token you created |
 | Require | Optional; add IP/Country constraints if clients come from fixed networks |
 
-Machine clients authenticate with Cloudflare Access headers:
+Machine clients authenticate with Cloudflare Access headers plus the FlareMo application PAT:
 
 ```bash
 curl "$FLAREMO_URL/api/v1/memos" \
   -H "CF-Access-Client-Id: $FLAREMO_ACCESS_CLIENT_ID" \
-  -H "CF-Access-Client-Secret: $FLAREMO_ACCESS_CLIENT_SECRET"
+  -H "CF-Access-Client-Secret: $FLAREMO_ACCESS_CLIENT_SECRET" \
+  -H "Authorization: Bearer $FLAREMO_MEMOS_PAT"
 ```
 
 MCP example:
@@ -110,7 +115,20 @@ curl "$FLAREMO_URL/api/v1/mcp" \
   -H "content-type: application/json" \
   -H "CF-Access-Client-Id: $FLAREMO_ACCESS_CLIENT_ID" \
   -H "CF-Access-Client-Secret: $FLAREMO_ACCESS_CLIENT_SECRET" \
+  -H "Authorization: Bearer $FLAREMO_MEMOS_PAT" \
   --data '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
+The current Memos-style stateless MCP surface is at `/mcp` and supports `initialize`, `notifications/initialized`, `tools/list`, and `tools/call`:
+
+```bash
+curl "$FLAREMO_URL/mcp" \
+  -H "content-type: application/json" \
+  -H "accept: application/json, text/event-stream" \
+  -H "CF-Access-Client-Id: $FLAREMO_ACCESS_CLIENT_ID" \
+  -H "CF-Access-Client-Secret: $FLAREMO_ACCESS_CLIENT_SECRET" \
+  -H "Authorization: Bearer $FLAREMO_MEMOS_PAT" \
+  --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26"}}'
 ```
 
 Do not turn the Service Token into a FlareMo app token. FlareMo application code does not read, issue, or store these credentials.
@@ -121,6 +139,7 @@ Public shares need unauthenticated access to the share page and shared attachmen
 
 - `/share/*`
 - `/api/public/shares/*`
+- `/file/*` (for public attachment URLs carrying a valid `share_token`; private requests remain protected by FlareMo)
 - `/assets/*`
 
 Recommended policies:
@@ -129,9 +148,10 @@ Recommended policies:
 | --- | --- | --- |
 | `/share/*` | `Bypass` | `Everyone` |
 | `/api/public/shares/*` | `Bypass` | `Everyone` |
+| `/file/*` | `Bypass` | `Everyone` |
 | `/assets/*` | `Bypass` | `Everyone` |
 
-Only bypass these public paths. Do not bypass `/api/v1/*`, `/openapi.json`, or the root application. `Bypass` disables Access enforcement and Access logging for matching requests; machine clients that need authentication and auditability should use `Service Auth`.
+Only bypass these public paths. Do not bypass `/api/v1/*`, `/openapi.json`, or the root application. `/file/*` carries both Memos Web private attachment URLs and public URLs with a `share_token`; when Access is bypassed, the Worker still requires a Better Auth cookie/session bearer, native access JWT, or PAT for the private branch and validates the share token, expiry, revocation, memo state, and attachment ownership for the public branch. `Bypass` disables Access enforcement and Access logging for matching requests; machine clients that need authentication and auditability should use `Service Auth`.
 
 The bypass only skips Cloudflare Access. FlareMo still validates share token, expiration time, and memo state. Archived, trashed, deleted, or expired shares must remain inaccessible.
 
@@ -162,11 +182,11 @@ curl -I "$FLAREMO_URL/api/public/shares/not-a-real-token"
 
 - The root hostname or Worker URL has a Cloudflare Access application.
 - Human access uses an `Allow` policy scoped to allowed users only.
-- Scripts, MCP, and Memos-compatible clients use a `Service Auth` policy and Access Service Token.
+- Scripts, MCP, and Memos-compatible clients use a FlareMo `memos_pat_` token, plus a `Service Auth` policy and Access Service Token when Access remains enabled.
 - The `Client Secret` is not committed to the repository, issues, PRs, or public logs.
-- `/share/*`, `/api/public/shares/*`, and `/assets/*` have explicit `Bypass` policies.
+- `/share/*`, `/api/public/shares/*`, `/file/*`, and `/assets/*` have explicit `Bypass` policies; `/file/*` remains fail-closed at the FlareMo application layer.
 - The root application, `/api/v1/*`, and `/openapi.json` are not bypassed.
-- FlareMo has no app-level Bearer token login.
+- Access is not treated as FlareMo application identity; private API requests still use a Better Auth cookie/session bearer or `memos_pat_` PAT.
 
 ## Local Development
 

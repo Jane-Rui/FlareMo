@@ -2,6 +2,112 @@
 
 FlareMo 使用 SemVer。每个 release 都要写清楚升级影响、Cloudflare 资源变化和 Memos 兼容面变化。
 
+## Unreleased
+
+后续变更将在下一次 release 汇总。
+
+## v0.4.3
+
+生产 Worker 路由收口补丁。这个版本把 Better Auth 和 Memos-compatible 入口在 Cloudflare Workers 静态资源回退下的路由边界正式收口，确保原生鉴权不依赖 Cloudflare Access 才能工作。
+
+### 已修复
+
+- `/api/*`、根 `/mcp` 和根 `/openapi.json` 明确优先进入 Worker；不会被 SPA 静态资源回退吞掉。
+- 未认证访问 `/api/app/health`、`/api/v1/openapi.json` 和 `/mcp` 返回 JSON `401`，而不是边缘路由导致的 `500` 或 HTML。
+- 根 OpenAPI 文档和 Streamable HTTP MCP 入口在生产自定义域名上保持 Worker 响应，继续复用 Better Auth cookie session、session bearer 或 `memos_pat_` PAT 的应用层身份边界。
+
+### Cloudflare、数据库与兼容影响
+
+- 本版本不新增 D1 migration，不改变 D1/R2 资源绑定；已完成 bootstrap 的实例不需要重新初始化。
+- Cloudflare Access 仍是可选的外层 policy，不是应用身份来源；生产主域名已通过 Better Auth 原生鉴权完成匿名 `401`、可信 Origin 和登录后的私有资源验证。
+- Memos 兼容面没有扩大：仍是已记录的 current camelCase REST、Better Auth-backed auth facade、PAT、legacy wire 和 `/mcp` 无状态 MCP 子集；不宣称完整 Memos Server parity、原生 JWT/refresh parity 或所有第三方客户端已验证。
+
+### 升级说明
+
+- 执行标准的 `pnpm verify`、`pnpm deploy:dry-run` 和 `pnpm deploy`；远端 D1 应显示没有待执行 migration。
+- 保持现有 `FLAREMO_PUBLIC_URL`、`FLAREMO_TRUSTED_ORIGINS`、`BETTER_AUTH_SECRET`、`FLAREMO_BOOTSTRAP_SECRET` 和已创建 PAT 配置；不要把任何 secret、密码、cookie 或 PAT 写入 Git、release notes、日志或聊天。
+- 部署后重新验证登录页、bootstrap status、受保护 API 的 JSON `401`、可信/不可信 Origin、公开分享和 `/mcp`。若启用 Cloudflare Access，它只能作为额外 policy，客户端仍必须提供 FlareMo 应用层 session 或 PAT。
+
+## v0.4.2
+
+Better Auth 与 Memos-compatible 集成收口版本。这个版本不新增 D1 migration，重点修复 partial bootstrap、current auth facade 和渠道 Worker 的应用层认证边界。
+
+### 已修复
+
+- bootstrap status 只有在 `auth_bootstrap` 的完成状态、owner IDs 和精确 `auth_user_links` 映射全部一致时才报告 `complete`；未来用户 link 或 partial write 不会误开放 setup。
+- 增加默认关闭的 `POST /api/auth/flaremo/recover-bootstrap` operator recovery，只协调唯一既有 Better Auth 身份与 `users/owner`，不接受用户名/密码、不创建第二个认证用户；多身份或歧义映射 fail closed 返回 `409`。
+- current Memos `auth/refresh` 的 session bearer 统一经过共享认证 context，补齐过期、PAT 拒绝和 trusted Origin 校验；无 Origin 的机器 session bearer 仍可用。
+- credential-bearing current signin/refresh 与 PAT 创建响应设置 `Cache-Control: no-store`；current signout 在同时收到 bearer 和 cookie 时会同时撤销 session 并清理 cookie。
+- Telegram Worker 改为必须使用 Better Auth `memos_pat_` PAT；Cloudflare Access headers 仅在成对配置时追加，缺失/半配置 fail closed，FlareMo 目标 URL 强制为 HTTPS origin。
+- bootstrap secret 最少 32 个字符；生产 `FLAREMO_PUBLIC_URL` 强制 HTTPS，本地 `.test`/localhost HTTP 仅用于开发测试。
+
+### Cloudflare、数据库与兼容影响
+
+- 本版本不新增 D1 migration；现有认证表和 PAT 仍必须纳入备份、恢复和演练范围。
+- Cloudflare Access 仍是可选外层 policy，不能替代 Better Auth cookie/session bearer 或 PAT。公开分享是否能穿过 Access 仍取决于 Cloudflare 控制面的精确 bypass policy。
+- 登录、bootstrap 和 operator recovery 的跨 edge 失败/请求限流需要在 Cloudflare WAF/Rate Limiting 配置；Worker 内置限流只是单 isolate 补充。
+- 继续提供已记录的 Memos-compatible 子集，不宣称完整 Memos Server parity、原生 JWT parity 或所有第三方客户端已验证。
+
+### 升级说明
+
+- 保持现有 `FLAREMO_PUBLIC_URL`、`FLAREMO_TRUSTED_ORIGINS`、Better Auth secrets 和已创建的 PAT 配置；不要把任何 secret、密码、cookie 或 PAT 写入 Git、release notes、日志或聊天。
+- 尚未 bootstrap 的实例需要使用不少于 32 个字符的 bootstrap secret；生产 canonical URL 必须是 HTTPS。
+- 若 bootstrap status 为 `recovery_required`，仅在批准的 operator recovery 窗口临时配置 recovery secret，调用 `recover-bootstrap` 后立即轮换或删除该 secret。
+- Telegram Worker 新增必需的 `FLAREMO_MEMOS_PAT` secret；生产仍启用 Access 时，再配置成对的 Access client ID/secret。
+
+## v0.4.1
+
+鉴权安全收口补丁。这个版本把 Better Auth、operator recovery 和 Memos-compatible auth facade 的安全边界收紧，同时不改变 D1 schema。
+
+### 已修复
+
+- Better Auth 的危险 cookie 请求（包括直接 Better Auth endpoint、bootstrap/recovery 和 current Memos signin/refresh）统一要求携带并精确匹配 trusted Origin；缺失或不可信 Origin 返回 `403`。
+- 增加独立、默认关闭的 `FLAREMO_RECOVERY_SECRET` operator recovery：只重置已完成 bootstrap 的既有 owner，复用 Better Auth 的一次性 reset/password hashing/session 撤销流程，并撤销所有 `memos_pat_`；不创建第二个 owner。
+- current Memos facade 的 PAT signout 现在会验证 PAT，随机/无效 PAT 不再得到假成功响应；Access headers 仍不能单独成为应用身份。
+- 明确记录当前没有 email provider，Better Auth 忘记密码邮件流程保持关闭；恢复能力与普通“知道当前密码时修改密码”不再混淆。
+
+### Cloudflare、数据库与兼容影响
+
+- 本版本不新增 D1 migration；已有 Better Auth 认证表仍必须包含在 D1 备份、恢复和演练范围内。
+- Cloudflare Access 仍只是可选外层 policy；Access headers 或 Service Token 不会成为 FlareMo 应用身份。
+- 本版本继续提供已记录的 Memos-compatible 子集，不宣称完整 Memos Server parity、原生 JWT parity 或第三方客户端已验证。
+
+### 升级说明
+
+- 保持现有 `FLAREMO_PUBLIC_URL`、`FLAREMO_TRUSTED_ORIGINS`、`BETTER_AUTH_SECRET` 和 `FLAREMO_BOOTSTRAP_SECRET` 配置；不要把 secret、密码、cookie 或 PAT 写入 Git、release notes、日志或聊天。
+- `FLAREMO_RECOVERY_SECRET` 默认不配置；只在批准的 operator recovery 窗口临时配置，成功后立即轮换或删除。
+- 升级后重新验证 trusted Origin、cookie session、PAT 创建/访问/撤销、旧 session/PAT 失效和公开分享；生产 authenticated smoke 若仍被 Cloudflare Access 拦截，必须通过已授权 Access session/token 验证，不能把 Access headers 当作应用身份。
+
+## v0.4.0
+
+Memos current 兼容与原生认证生态版本。这个版本把 FlareMo 从“有 Better Auth/PAT 基础的 Memos-compatible API”推进到默认 current camelCase REST、Better Auth-backed auth facade 和根 `/mcp` 无状态 Streamable HTTP MCP 子集，同时保留旧 wire 供已有客户端迁移。
+
+### 已包含
+
+- 接入 Better Auth + D1/Drizzle adapter：用户名/密码、HttpOnly cookie session、一次性 owner bootstrap，并关闭正常公共 signup。
+- 保留既有 `users/owner`、memo、attachment、R2 object key 和 share token，通过 `auth_user_links` 做认证身份到业务用户的桥接。
+- 增加 `memos_pat_` Personal Access Token 基础：由 cookie session 创建，明文只在创建时返回一次，可以列出元数据和撤销；PAT 可用于 current `/api/v1/*`、旧式 `/api/v1/mcp` 和根 `/mcp` 子集。
+- 新增 `FLAREMO_PUBLIC_URL`、可选 `FLAREMO_TRUSTED_ORIGINS` 两个公开 Worker vars；`BETTER_AUTH_SECRET` 和 `FLAREMO_BOOTSTRAP_SECRET` 必须通过 Wrangler secret 或 Cloudflare 控制台配置。
+- 增加按凭据区分的 Origin 安全契约：cookie session 的 `POST`、`PATCH`、`DELETE` 等状态变更必须携带并精确命中 allowlist；PAT 可以无 Origin，但携带 Origin 时也必须命中，否则返回 `403`。Access headers 不替代应用层 Origin 校验。
+- 默认 `/api/v1` 增加 current Memos camelCase / protobuf-JSON wire adapter，包括 current memo、attachment、relation、share、user、PAT DTO、current 大写枚举、有限 filter/order、分页、`updateMask`、nested relation/share 和标准错误。
+- 增加 Better Auth-backed current auth facade：`/api/v1/auth/me`、`signin`、`refresh`、`signout`。`accessToken` 是 opaque session-backed token，不是 Memos 原生 JWT。
+- 增加根 `/mcp` 无状态 JSON Streamable HTTP MCP 子集，支持 `initialize`、`notifications/initialized`、`tools/list` 和 `tools/call`；保留 `/api/v1/mcp` 旧式 JSON-RPC 工具名。
+- 增加 current OpenAPI 文档和显式 legacy wire negotiation；FlareMo Web 内部客户端明确选择 legacy wire，外部 `/api/v1` 调用默认选择 current wire。
+- 增加 current contracts、adapter、OpenAPI、MCP 和 Worker/E2E 测试，并记录第三方客户端仍需真实 smoke test 的兼容边界。
+
+### Cloudflare、数据库与兼容影响
+
+- 本版本不新增 D1 migration；已有 Better Auth 认证表仍必须包含在 D1 备份、恢复和演练范围内，包括 `auth_users`、`auth_sessions`、`auth_accounts`、`auth_verifications`、`auth_apikeys`、`auth_user_links` 和 `auth_bootstrap`。
+- 第一轮生产部署建议保留 Cloudflare Access。Access Service Token 只通过外层 policy，不自动成为 FlareMo 应用用户身份；启用 Access 时，机器请求仍需 FlareMo PAT。
+- 本版本不承诺完整 Memos Server parity、完整 CEL、Connect/gRPC、SSE、Memos 原生 JWT 字节级 parity、comments/reactions/shortcuts 或第三方客户端已验证。完整兼容矩阵见 `docs/memos-compatibility.md`。
+
+### 升级说明
+
+- 设置 `wrangler.jsonc` 中的 `FLAREMO_PUBLIC_URL`，并通过 `wrangler secret put` 配置两个 Better Auth secrets；不要把真实值写进仓库、release notes、issue、日志或聊天。
+- 本版本不需要新的 D1 migration；尚未 bootstrap 的实例仍需由部署者在生产 HTTPS 的 `/setup` 页面手动完成一次 owner bootstrap。bootstrap secret、用户名、邮箱和初始密码不进入 shell、Agent 输出、release notes、Git 或日志。
+- 验证 cookie session、密码修改后的其他 session 撤销、PAT 创建/访问/撤销、公开分享匿名访问和无凭据 `401`；同时验证 cookie mutation 的 trusted Origin、无 Origin 的 PAT，以及不可信 Origin 的 `403`。
+- 在认证与备份脚本完成远端演练前，不要关闭 Access，也不要把本次变更宣称为完整生产认证/恢复验收。生产入口仍可保留 Access 作为外层防线；Better Auth 是应用层身份来源。
+
 ## v0.3.0
 
 自托管更新体验版本。这个版本让 Deploy Button 创建的 GitHub 仓库可以发现上游稳定 Release、准备可审查的升级 PR，并在合并后继续使用 Cloudflare Workers Builds 发布。

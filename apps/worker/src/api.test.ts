@@ -7,6 +7,13 @@ import app from "./index";
 
 let mf: Miniflare;
 let env: Env;
+let sessionCookie: string;
+
+const TEST_AUTH_SECRET =
+  "test-better-auth-secret-that-is-never-used-in-production";
+const TEST_BOOTSTRAP_SECRET =
+  "test-bootstrap-secret-that-is-never-used-in-production";
+const TEST_PASSWORD = "test-password-not-for-production-123";
 
 describe("FlareMo Worker API", () => {
   beforeEach(async () => {
@@ -34,7 +41,10 @@ describe("FlareMo Worker API", () => {
       FLAREMO_DEPLOY_REPOSITORY: "example/flaremo",
       FLAREMO_SINGLE_USER_EMAIL: "owner@example.com",
       FLAREMO_SINGLE_USER_NAME: "Owner",
-    };
+      FLAREMO_PUBLIC_URL: "http://flaremo.test",
+      BETTER_AUTH_SECRET: TEST_AUTH_SECRET,
+      FLAREMO_BOOTSTRAP_SECRET: TEST_BOOTSTRAP_SECRET,
+    } as Env;
 
     const migration = await readFile(
       resolve(
@@ -71,11 +81,44 @@ describe("FlareMo Worker API", () => {
       ),
       "utf8",
     );
+    const nativeAuth = await readFile(
+      resolve(
+        import.meta.dirname,
+        "../../../migrations/0005_confused_masque.sql",
+      ),
+      "utf8",
+    );
+    const sseEvents = await readFile(
+      resolve(
+        import.meta.dirname,
+        "../../../migrations/0007_flat_phil_sheldon.sql",
+      ),
+      "utf8",
+    );
+    const userServiceParity = await readFile(
+      resolve(
+        import.meta.dirname,
+        "../../../migrations/0008_legal_scarecrow.sql",
+      ),
+      "utf8",
+    );
+    const webhookOutbox = await readFile(
+      resolve(
+        import.meta.dirname,
+        "../../../migrations/0009_neat_iron_fist.sql",
+      ),
+      "utf8",
+    );
     await applyMigration(db, migration);
     await applyMigration(db, cleanup);
     await applyMigration(db, v020);
     await applyMigration(db, offlineCapture);
     await applyMigration(db, offlineAttachments);
+    await applyMigration(db, nativeAuth);
+    await applyMigration(db, sseEvents);
+    await applyMigration(db, userServiceParity);
+    await applyMigration(db, webhookOutbox);
+    sessionCookie = await bootstrapAndSignIn();
   });
 
   afterEach(async () => {
@@ -103,7 +146,9 @@ describe("FlareMo Worker API", () => {
     expect(byTag.memos).toHaveLength(1);
 
     const openapi = await json(
-      await fetchApp("http://flaremo.test/openapi.json"),
+      await fetchApp("http://flaremo.test/openapi.json", {
+        headers: { "x-flaremo-wire": "legacy" },
+      }),
     );
     expect(openapi.paths["/api/v1/memos"]).toBeTruthy();
 
@@ -352,7 +397,7 @@ describe("FlareMo Worker API", () => {
     expect(health).toMatchObject({
       ok: true,
       product: "FlareMo",
-      version: "0.3.0",
+      version: "0.4.3",
       update_repository: "example/flaremo",
       update_workflow_url:
         "https://github.com/example/flaremo/actions/workflows/flaremo-update.yml",
@@ -369,6 +414,30 @@ describe("FlareMo Worker API", () => {
     expect(health).toMatchObject({
       update_repository: null,
       update_workflow_url: null,
+    });
+  });
+
+  it("returns JSON authentication errors for protected metadata endpoints", async () => {
+    const health = await fetchApp(
+      "http://flaremo.test/api/app/health",
+      undefined,
+      { authenticated: false },
+    );
+    expect(health.status).toBe(401);
+    expect(health.headers.get("content-type")).toContain("application/json");
+    expect(await health.json()).toEqual({
+      error: { message: "Authentication required" },
+    });
+
+    const openapi = await fetchApp(
+      "http://flaremo.test/api/v1/openapi.json",
+      undefined,
+      { authenticated: false },
+    );
+    expect(openapi.status).toBe(401);
+    expect(openapi.headers.get("content-type")).toContain("application/json");
+    expect(await openapi.json()).toEqual({
+      error: { message: "Authentication required" },
     });
   });
 
@@ -495,6 +564,44 @@ describe("FlareMo Worker API", () => {
       `http://flaremo.test/api/v1/${attachment.name}/blob`,
     );
     expect(await blob.text()).toBe("hello attachment");
+
+    const unauthenticatedFile = await fetchApp(
+      `http://flaremo.test/file/${attachment.name}/hello.txt`,
+      undefined,
+      { authenticated: false },
+    );
+    expect(unauthenticatedFile.status).toBe(401);
+
+    const fileUrl = `http://flaremo.test/file/${attachment.name}/hello.txt`;
+    const file = await fetchApp(fileUrl, {
+      headers: { cookie: sessionCookie },
+    });
+    expect(file.status).toBe(200);
+    expect(file.headers.get("content-type")).toContain("text/plain");
+    expect(file.headers.get("content-disposition")).toContain(
+      'filename="hello.txt"',
+    );
+    expect(await file.text()).toBe("hello attachment");
+
+    const fileWithUntrustedName = await fetchApp(
+      `http://flaremo.test/file/${attachment.name}/not-the-real-file.txt`,
+      { headers: { cookie: sessionCookie } },
+    );
+    expect(fileWithUntrustedName.status).toBe(200);
+    expect(await fileWithUntrustedName.text()).toBe("hello attachment");
+
+    const partialFile = await fetchApp(fileUrl, {
+      headers: { cookie: sessionCookie, range: "bytes=0-4" },
+    });
+    expect(partialFile.status).toBe(206);
+    expect(await partialFile.text()).toBe("hello");
+
+    const etag = file.headers.get("etag");
+    expect(etag).toBeTruthy();
+    const notModified = await fetchApp(fileUrl, {
+      headers: { cookie: sessionCookie, "if-none-match": etag ?? "" },
+    });
+    expect(notModified.status).toBe(304);
 
     const deleted = await json(
       await fetchApp(`http://flaremo.test/api/v1/${attachment.name}`, {
@@ -678,7 +785,7 @@ describe("FlareMo Worker API", () => {
       "file",
       new File(["shared attachment"], "shared.txt", { type: "text/plain" }),
     );
-    await json(
+    const sharedAttachment = await json<{ name: string }>(
       await fetchApp("http://flaremo.test/api/v1/attachments", {
         method: "POST",
         body: formData,
@@ -708,6 +815,22 @@ describe("FlareMo Worker API", () => {
     expect(blob.ok).toBe(true);
     expect(await blob.text()).toBe("shared attachment");
 
+    const memosWebShareFile = await fetchApp(
+      `http://flaremo.test/file/${sharedAttachment.name}/shared.txt?share_token=${encodeURIComponent(share.token)}`,
+      undefined,
+      { authenticated: false },
+    );
+    expect(memosWebShareFile.status).toBe(200);
+    expect(memosWebShareFile.headers.get("cache-control")).toContain("public");
+    expect(await memosWebShareFile.text()).toBe("shared attachment");
+
+    const invalidShareFile = await fetchApp(
+      `http://flaremo.test/file/${sharedAttachment.name}/shared.txt?share_token=invalid-token`,
+      undefined,
+      { authenticated: false },
+    );
+    expect(invalidShareFile.status).toBe(404);
+
     const otherMemo = await createMemo("not shared");
     const otherFormData = new FormData();
     otherFormData.set("memo", otherMemo.name);
@@ -726,6 +849,13 @@ describe("FlareMo Worker API", () => {
     );
     expect(forbiddenBlob.status).toBe(404);
 
+    const forbiddenMemosWebFile = await fetchApp(
+      `http://flaremo.test/file/${otherAttachment.name}/private.txt?share_token=${encodeURIComponent(share.token)}`,
+      undefined,
+      { authenticated: false },
+    );
+    expect(forbiddenMemosWebFile.status).toBe(404);
+
     await json(
       await fetchApp(`http://flaremo.test/api/v1/${memo.name}`, {
         method: "PATCH",
@@ -740,8 +870,83 @@ describe("FlareMo Worker API", () => {
   });
 });
 
-function fetchApp(input: string, init?: RequestInit) {
-  return app.fetch(new Request(input, init), env);
+function fetchApp(
+  input: string,
+  init?: RequestInit,
+  options: { authenticated?: boolean } = {},
+) {
+  const headers = new Headers(init?.headers);
+  const path = new URL(input).pathname;
+  if (
+    options.authenticated !== false &&
+    (path.startsWith("/api/app/") || path.startsWith("/api/v1/"))
+  ) {
+    headers.set("cookie", sessionCookie);
+    if (path.startsWith("/api/v1/") && !headers.has("x-flaremo-wire")) {
+      headers.set("x-flaremo-wire", "legacy");
+    }
+    if (!headers.has("origin") && isUnsafeMethod(init?.method)) {
+      headers.set("origin", "http://flaremo.test");
+    }
+  }
+  return app.fetch(new Request(input, { ...init, headers }), env);
+}
+
+function isUnsafeMethod(method: string | undefined) {
+  return !["GET", "HEAD", "OPTIONS"].includes((method ?? "GET").toUpperCase());
+}
+
+async function bootstrapAndSignIn() {
+  const setup = await app.fetch(
+    new Request("http://flaremo.test/api/auth/flaremo/bootstrap", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-flaremo-bootstrap-secret": TEST_BOOTSTRAP_SECRET,
+        origin: "http://flaremo.test",
+      },
+      body: JSON.stringify({
+        username: "owner",
+        name: "Owner",
+        email: "owner@example.com",
+        password: TEST_PASSWORD,
+      }),
+    }),
+    env,
+  );
+  expect(setup.status).toBe(201);
+
+  const signIn = await app.fetch(
+    new Request("http://flaremo.test/api/auth/sign-in/username", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin: "http://flaremo.test",
+      },
+      body: JSON.stringify({
+        username: "owner",
+        password: TEST_PASSWORD,
+      }),
+    }),
+    env,
+  );
+  expect(signIn.status).toBe(200);
+  return extractCookieHeader(signIn);
+}
+
+function extractCookieHeader(response: Response) {
+  const headers = response.headers as Headers & {
+    getSetCookie?: () => string[];
+  };
+  const setCookies = headers.getSetCookie?.() ?? [
+    response.headers.get("set-cookie"),
+  ];
+  const cookies = setCookies
+    .filter((value): value is string => Boolean(value))
+    .map((value) => value.split(";", 1)[0] ?? "")
+    .filter(Boolean);
+  expect(cookies.length).toBeGreaterThan(0);
+  return cookies.join("; ");
 }
 
 async function createMemo<T = Record<string, unknown>>(content: string) {

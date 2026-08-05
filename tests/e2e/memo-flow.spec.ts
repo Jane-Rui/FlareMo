@@ -1,4 +1,13 @@
 import { expect, test } from "@playwright/test";
+import { E2E_BASE_URL } from "./auth-fixture";
+
+const E2E_COOKIE_MUTATION_OPTIONS = {
+  headers: { origin: E2E_BASE_URL },
+};
+
+const E2E_LEGACY_API_MUTATION_OPTIONS = {
+  headers: { origin: E2E_BASE_URL, "x-flaremo-wire": "legacy" },
+};
 
 test("creates a memo and filters it by tag", async ({ page }) => {
   const tag = `e2e${Date.now()}`;
@@ -44,8 +53,10 @@ test("queues an offline note and saves it after connectivity returns", async ({
   const content = `Queued offline note #offline${Date.now()}`;
 
   await page.goto("/");
+  const composer = page.getByRole("textbox", { name: /new note|新笔记/i });
+  await expect(composer).toBeVisible();
   await page.context().setOffline(true);
-  await page.getByRole("textbox", { name: /new note|新笔记/i }).fill(content);
+  await composer.fill(content);
   await page.getByRole("button", { name: /save|保存/i }).click();
   await expect(page.getByText(/offline|离线/i)).toBeVisible();
 
@@ -61,9 +72,11 @@ test("searches timeline and archived notes by default and supports archive synta
   const timeline = `Timeline search marker ${marker}`;
   const archived = `Archived search marker ${marker}`;
   const timelineResponse = await page.request.post("/api/app/memos", {
+    ...E2E_COOKIE_MUTATION_OPTIONS,
     data: { content: timeline },
   });
   const archivedResponse = await page.request.post("/api/app/memos", {
+    ...E2E_COOKIE_MUTATION_OPTIONS,
     data: { content: archived },
   });
   expect(timelineResponse.ok()).toBe(true);
@@ -71,7 +84,7 @@ test("searches timeline and archived notes by default and supports archive synta
   const archivedMemo = (await archivedResponse.json()) as { id: string };
   const archiveResponse = await page.request.patch(
     `/api/app/memos/${archivedMemo.id}`,
-    { data: { status: "archived" } },
+    { ...E2E_COOKIE_MUTATION_OPTIONS, data: { status: "archived" } },
   );
   expect(archiveResponse.ok()).toBe(true);
 
@@ -103,6 +116,7 @@ test("shows a memo submitted by an external agent in the timeline", async ({
 }) => {
   const marker = `Agent ingestion ${Date.now()}`;
   const response = await page.request.post("/api/v1/memos", {
+    ...E2E_LEGACY_API_MUTATION_OPTIONS,
     data: {
       content: `${marker} #telegram`,
       source: "telegram",
@@ -126,6 +140,7 @@ test("keeps filters in the URL and opens a Markdown memo detail", async ({
 }) => {
   const marker = `markdown${Date.now()}`;
   const response = await page.request.post("/api/app/memos", {
+    ...E2E_COOKIE_MUTATION_OPTIONS,
     data: {
       content: `# Markdown detail\n\n**${marker}**\n\n- [x] rendered`,
     },
@@ -152,6 +167,7 @@ test("restores a memo revision without reloading the detail page", async ({
   const original = `Original revision ${marker}`;
   const updated = `Updated revision ${marker}`;
   const createResponse = await page.request.post("/api/app/memos", {
+    ...E2E_COOKIE_MUTATION_OPTIONS,
     data: { content: original },
   });
   expect(createResponse.ok()).toBe(true);
@@ -160,6 +176,7 @@ test("restores a memo revision without reloading the detail page", async ({
   expect(memoId).toBeTruthy();
 
   const updateResponse = await page.request.patch(`/api/app/memos/${memoId}`, {
+    ...E2E_COOKIE_MUTATION_OPTIONS,
     data: { content: updated },
   });
   expect(updateResponse.ok()).toBe(true);
@@ -328,6 +345,7 @@ test("loads notes beyond the first page", async ({ page }) => {
   const marker = `page${Date.now()}`;
   for (let index = 0; index < 32; index += 1) {
     const response = await page.request.post("/api/app/memos", {
+      ...E2E_COOKIE_MUTATION_OPTIONS,
       data: { content: `${marker}-${index}` },
     });
     expect(response.ok()).toBe(true);
@@ -349,12 +367,12 @@ test("shows the installed version and safe update fallback", async ({
     name: /system update|系统更新/i,
   });
   await expect(updateButton).toBeVisible();
-  await expect(updateButton).toContainText("v0.3.0");
+  await expect(updateButton).toContainText("v0.4.3");
   await updateButton.click();
 
   const dialog = page.getByRole("dialog");
   await expect(dialog).toBeVisible();
-  await expect(dialog).toContainText("v0.3.0");
+  await expect(dialog).toContainText("v0.4.3");
   await expect(
     dialog.getByRole("link", { name: /update guide|升级指南/i }),
   ).toHaveAttribute("href", /docs\/update\.md$/);
@@ -367,9 +385,11 @@ test("creates, follows, reads, and removes memo relations", async ({
   const sourceContent = `Relation source ${marker}`;
   const targetContent = `Relation target ${marker}`;
   const sourceResponse = await page.request.post("/api/app/memos", {
+    ...E2E_COOKIE_MUTATION_OPTIONS,
     data: { content: sourceContent },
   });
   const targetResponse = await page.request.post("/api/app/memos", {
+    ...E2E_COOKIE_MUTATION_OPTIONS,
     data: { content: targetContent },
   });
   expect(sourceResponse.ok()).toBe(true);
@@ -408,6 +428,7 @@ test("creates, follows, reads, and removes memo relations", async ({
 
   const contextResponse = await page.request.get(
     `/api/v1/${source.name}/relation-context`,
+    { headers: { "x-flaremo-wire": "legacy" } },
   );
   expect(contextResponse.ok()).toBe(true);
   expect(await contextResponse.json()).toMatchObject({ relations: [] });
@@ -451,6 +472,7 @@ test("keeps activity labels and the focused composer fully visible", async ({
 test("keeps the mobile navigation usable", async ({ page }) => {
   for (let index = 0; index < 18; index += 1) {
     const response = await page.request.post("/api/app/memos", {
+      ...E2E_COOKIE_MUTATION_OPTIONS,
       data: {
         content: `Mobile overflow ${index} #mobile${index}`,
         payload: { tags: [`mobile${index}`] },
