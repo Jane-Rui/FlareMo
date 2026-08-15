@@ -68,21 +68,27 @@ jobs:
 
           git remote add flaremo-upstream "https://github.com/${UPSTREAM_REPOSITORY}.git"
           git fetch --no-tags flaremo-upstream \
-            "refs/tags/v${current_version}:refs/tags/v${current_version}" \
             "refs/tags/${target_version}:refs/tags/${target_version}"
 
-          update_patch="$(mktemp)"
-          git diff --binary --full-index \
-            "refs/tags/v${current_version}" \
-            "refs/tags/${target_version}" > "${update_patch}"
-          if ! git apply --3way --index "${update_patch}"; then
+          git config user.name "flaremo-sync[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Real three-way merge instead of a tag-to-tag patch.
+          # git merge resolves the true common ancestor, so a deployment
+          # repository that already contains upstream commits from between
+          # two release tags still merges cleanly instead of double-applying
+          # the overlapping changes (which made git apply --3way conflict).
+          if ! git merge --no-edit -m "Sync FlareMo from v${current_version} to ${target_version}" "${target_version}"; then
+            git merge --abort || true
             echo "The deployment repository conflicts with ${target_version}. Manual resolution required." >&2
             exit 1
           fi
 
-          git config user.name "flaremo-sync[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "Sync FlareMo from v${current_version} to ${target_version}"
+          merged_version="$(node -p "JSON.parse(require('node:fs').readFileSync('package.json', 'utf8')).version")"
+          if [[ "${target_number}" != "${merged_version}" ]]; then
+            echo "Merge result version ${merged_version} does not match ${target_version}. Manual resolution required." >&2
+            exit 1
+          fi
 
           git push origin "HEAD:${GITHUB_REF_NAME}"
           echo "Synced to ${target_version} and pushed to main."

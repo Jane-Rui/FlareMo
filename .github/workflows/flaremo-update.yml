@@ -70,7 +70,6 @@ jobs:
 
           git remote add flaremo-upstream "https://github.com/${UPSTREAM_REPOSITORY}.git"
           git fetch --no-tags flaremo-upstream \
-            "refs/tags/v${current_version}:refs/tags/v${current_version}" \
             "refs/tags/${target_version}:refs/tags/${target_version}"
 
           update_branch="flaremo-update/${target_version}"
@@ -78,15 +77,21 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -C "${update_branch}" "origin/${BASE_BRANCH}"
 
-          update_patch="$(mktemp)"
-          git diff --binary --full-index \
-            "refs/tags/v${current_version}" \
-            "refs/tags/${target_version}" > "${update_patch}"
-          if ! git apply --3way --index "${update_patch}"; then
+          # Real three-way merge instead of a tag-to-tag patch: the merge base
+          # is the true common ancestor, so a deployment repository that already
+          # contains upstream commits from between release tags merges cleanly
+          # instead of double-applying overlapping changes.
+          if ! git merge --no-edit -m "Update FlareMo from v${current_version} to ${target_version}" "${target_version}"; then
+            git merge --abort || true
             echo "The deployment repository conflicts with ${target_version}. Resolve the update manually." >&2
             exit 1
           fi
-          git commit -m "Update FlareMo from v${current_version} to ${target_version}"
+
+          merged_version="$(node -p "JSON.parse(require('node:fs').readFileSync('package.json', 'utf8')).version")"
+          if [[ "${target_number}" != "${merged_version}" ]]; then
+            echo "Merge result version ${merged_version} does not match ${target_version}. Resolve the update manually." >&2
+            exit 1
+          fi
 
           if git ls-remote --exit-code --heads origin "${update_branch}" >/dev/null 2>&1; then
             git fetch origin "refs/heads/${update_branch}:refs/remotes/origin/${update_branch}"
