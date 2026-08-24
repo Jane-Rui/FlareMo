@@ -13,9 +13,11 @@ import {
 import { useEffect, useState } from "react";
 import {
   createPersonalAccessToken,
+  getVectorUsage,
   listPersonalAccessTokens,
   type PersonalAccessToken,
   revokePersonalAccessToken,
+  type VectorUsageReport,
 } from "@/api";
 import { authClient } from "@/auth-client";
 import { errorMessage } from "@/components/auth-page-frame";
@@ -61,6 +63,11 @@ export function AccountPage() {
   const tokensQuery = useQuery({
     queryKey: ["personal-access-tokens"],
     queryFn: listPersonalAccessTokens,
+    retry: false,
+  });
+  const vectorUsageQuery = useQuery({
+    queryKey: ["vector-usage"],
+    queryFn: getVectorUsage,
     retry: false,
   });
   const updateUsernameMutation = useMutation({
@@ -201,10 +208,7 @@ export function AccountPage() {
 
         <section className="flex flex-wrap items-end justify-between gap-3 border-b pb-4">
           <div>
-            <p className="text-xs font-semibold tracking-[0.16em] text-primary uppercase">
-              {t("auth.nativeAccess")}
-            </p>
-            <h1 className="mt-1 font-heading text-2xl font-semibold">
+            <h1 className="font-heading text-2xl font-semibold">
               {t("auth.accountTitle")}
             </h1>
             <p className="mt-1 text-sm text-muted-foreground">
@@ -475,7 +479,96 @@ export function AccountPage() {
             </div>
           </CardContent>
         </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>{t("usage.vectorTitle")}</CardTitle>
+            <CardDescription>{t("usage.vectorDescription")}</CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-5">
+            {vectorUsageQuery.isLoading ? (
+              <Skeleton className="h-24 w-full" />
+            ) : vectorUsageQuery.isError || !vectorUsageQuery.data ? (
+              <p className="text-sm text-muted-foreground">
+                {t("usage.vectorUnavailable")}
+              </p>
+            ) : (
+              <VectorUsagePanel report={vectorUsageQuery.data} t={t} />
+            )}
+          </CardContent>
+        </Card>
       </main>
+    </div>
+  );
+}
+
+function VectorUsagePanel({
+  report,
+  t,
+}: {
+  report: VectorUsageReport;
+  t: (key: TranslationKey) => string;
+}) {
+  const totalStored = report.indexes.reduce(
+    (sum, index) => sum + index.stored_dimensions,
+    0,
+  );
+  const totalVectors = report.indexes.reduce(
+    (sum, index) => sum + index.vectors_count,
+    0,
+  );
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-wrap gap-6 text-sm">
+        <span className="text-muted-foreground">
+          {t("usage.model")}: {report.model}
+        </span>
+        <span className="text-muted-foreground">
+          {t("usage.dimensions")}: {report.dimensions}
+        </span>
+        <span className="text-muted-foreground">
+          {t("usage.vectors")}: {totalVectors}
+        </span>
+      </div>
+      <UsageBar
+        label={t("usage.stored")}
+        used={totalStored}
+        limit={report.stored_limit}
+      />
+      <UsageBar
+        label={t("usage.queried")}
+        used={report.queried_dimensions_this_month}
+        limit={report.queried_limit}
+      />
+      <p className="text-xs text-muted-foreground">{t("usage.disclaimer")}</p>
+    </div>
+  );
+}
+
+function UsageBar({
+  label,
+  used,
+  limit,
+}: {
+  label: string;
+  used: number;
+  limit: number;
+}) {
+  const percent = limit > 0 ? Math.min(100, (used / limit) * 100) : 0;
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="flex items-baseline justify-between text-sm">
+        <span>{label}</span>
+        <span className="text-muted-foreground tabular-nums">
+          {used.toLocaleString()} / {limit.toLocaleString()}
+        </span>
+      </div>
+      <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
+        <div
+          className="h-full rounded-full bg-flame-500 transition-[width]"
+          style={{ width: `${percent}%` }}
+        />
+      </div>
     </div>
   );
 }
