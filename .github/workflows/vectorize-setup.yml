@@ -1,0 +1,37 @@
+name: Vectorize Index Setup (one-time)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  create-indexes:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install wrangler
+        run: npm install -g wrangler
+
+      - name: Create flaremo-memos index
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: f6ff30bba40fbc7d791d83ab3e70daf9
+        run: |
+          wrangler vectorize list || true
+          wrangler vectorize create flaremo-memos --dimensions 1024 --metric cosine || echo "flaremo-memos: create failed or already exists"
+
+      - name: Create flaremo-memories index
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: f6ff30bba40fbc7d791d83ab3e70daf9
+        run: |
+          wrangler vectorize create flaremo-memories --dimensions 1024 --metric cosine || echo "flaremo-memories: create failed or already exists"
+
+      - name: Verify indexes
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: f6ff30bba40fbc7d791d83ab3e70daf9
+        run: wrangler vectorize list
