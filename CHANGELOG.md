@@ -2,6 +2,148 @@
 
 FlareMo 使用 SemVer。每个 release 都要写清楚升级影响、Cloudflare 资源变化和 Memos 兼容面变化。
 
+## v0.14.0
+
+邮件生命周期闭环 + 账号自助注销 + 可选限频版本。把 v0.13.0 引入的注册邮件验证补成完整闭环（重发、找回密码、换邮箱验证新地址），补上公开 SaaS 的合规底线（自助注销），并为凭据端点提供厂商中立的 per-IP 限频（呼应「不要验证码」的决策：不接验证码平台，用 Cloudflare 原生 rate limiting binding 防刷）。
+
+### 新增能力
+
+- 重发验证邮件（#118）：`POST /api/auth/flaremo/resend-verification`。未知地址与已验证身份返回同一成功形态（防账号枚举）；注册完成页新增「重新发送验证邮件」。
+- 自助找回密码（#118）：`POST /api/auth/flaremo/forgot-password` 发送 1 小时有效的重置邮件，链接走既有 `/reset` 页面 + Better Auth 原生 `/api/auth/reset-password`（重置成功自动撤销全部 session）。响应不区分地址是否注册。登录页「忘记密码」入口改指新 `/forgot-password` 页；自托管（无邮件 provider）在该页引导使用恢复密钥（`/recover`），原路径不变。
+- 换邮箱验证新地址（#118）：配置邮件 provider 后，改邮箱先验证当前密码 + 新地址占用（auth 与 domain 两处），向新地址发送 24h 确认邮件，点击 `/verify-email-change` 后才切换登录邮箱（auth + domain 同步）。确认前旧邮箱继续有效，打错地址不再锁死后续邮件流。provider 为 `none` 的自托管保持立即生效。
+- 账号自助注销（#124）：`DELETE /api/app/account`（当前密码确认）。domain 新增 `deleteFlaremoAccount`：逐表显式删除该用户全部 D1 数据（memos/attachments/revisions/tags/relations/reactions/shares/webhooks/notifications/shortcuts/usage counters/embedding outbox/projects/tasks/task activity/settings + Better Auth 身份/session/PAT），children-first、不依赖运行时外键级联；R2 附件对象与 Vectorize 向量（确定性 ID 枚举，幂等）同步清除，未绑定 R2/Vectorize 的部署自动跳过。owner 账号不可通过此入口注销（403）。账户页新增危险区（仅成员可见）。
+- 凭据端点可选限频（#122）：部署绑定 Cloudflare rate-limiting binding `RATE_LIMITER` 后，`/register`、`/resend-verification`、`/forgot-password` 与 Better Auth 的 sign-in/sign-up/forget-password/reset-password 路径按客户端 IP 分桶节流（超限 429）；session 读取不受影响。未绑定该 binding 的部署行为完全不变；binding 故障 fail-open（放行并记 error 日志）。
+
+### Memos 兼容面变化
+
+- 配置邮件 provider 的部署上，Memos 客户端注册路径（current `/api/v1/auth/signup`、Connect `AuthService.SignUp`）返回 403（#120）：这些兼容面无法完成邮箱验证，为防绕过闸门不再创建未验证账号。未配置 provider 的自托管行为不变。
+- 其余 `/api/v1/*` 兼容面不变。
+
+### Cloudflare、数据库与认证影响
+
+- 无数据库 migration、无新增必需资源。
+- 新增可选 binding：`RATE_LIMITER`（rate-limiting binding，如 `namespace_id = "1001"`、`limit = 30`、`period = "60"`）。自托管默认不绑定，行为与 v0.13.0 一致。
+- 新增端点：`POST /api/auth/flaremo/resend-verification`、`POST /api/auth/flaremo/forgot-password`、`GET /api/auth/flaremo/verify-email-change`、`DELETE /api/app/account`。全部受既有 Origin allowlist 契约约束（非安全方法必须携带精确 Origin）。
+- 换邮箱语义变化（仅 provider 非 none 时）：`POST /api/app/account/email` 响应新增 `verification_sent: true`，邮箱在确认前不切换。
+
+### 升级说明
+
+- 自托管直接 `pnpm deploy`，零配置，行为不变（provider `none` 时所有新端点要么 400 要么维持原路径）。
+- 公开 SaaS / 多用户部署：建议绑定 `RATE_LIMITER`；`admin` 与 Memos current 的既有用户删除入口本次未改动（仍为 v0.13.0 语义），如需彻底删除请走新的自助注销。
+
+## v0.13.0
+
+注册邮件验证版本。公开注册的人机防线从验证码改为邮件验证（按 Kim 拍板：不要验证码，用 Cloudflare Workers Paid 计划的 Email Sending，不接第三方发信商）。
+
+### 新增能力
+
+- Email provider seam（#117）：\`FLAREMO_EMAIL_PROVIDER\` = \`none\`（默认，自托管注册行为不变）/ \`cloudflare\`（\`env.EMAIL.send()\`，Workers Paid 计划）。\`FLAREMO_EMAIL_FROM\` 指定已验证发件地址。
+- 注册流程：配置 provider 后，注册成功即 mint 单次 24h 验证 token（\`auth_verifications\`，\`email-verify:\` 命名空间，与密码重置同一机制）并发送验证邮件；发送失败返回 502（fail-closed，不产生静默未验证账号）。
+- \`GET /api/auth/flaremo/verify-email?token=\`：消费 token、置 \`auth_users.email_verified\`，单次使用（消费即删）。
+- \`/register/status\` 暴露 \`email_verification_required\`；注册页成功后显示「查收邮件」状态；新增 \`/verify-email\` 页（成功/过期两态，zh/en）。
+
+### Memos 兼容面变化
+
+- \`/api/v1/*\` 兼容面不变。邮件验证仅影响浏览器注册流程；Memos 客户端注册路径（current/Connect）暂不强制验证（后续迭代）。
+
+### Cloudflare、数据库与认证影响
+
+- 无数据库 migration。新增可选变量：\`FLAREMO_EMAIL_PROVIDER\` / \`FLAREMO_EMAIL_FROM\`；启用 \`cloudflare\` 需在 wrangler 配置 \`send_email\` binding（EMAIL）并在 Cloudflare 控制台开通 Email Sending、验证发件域名（SPF/DKIM）。
+- 未配置 provider 时行为与 v0.12.0 完全一致。
+
+### 升级说明
+
+- 自托管直接 \`pnpm deploy\`，零配置，行为不变。
+- 公开 SaaS 实例（app.flaremo.app）：开通 Email Sending + 验证域名后配置 provider 即可启用注册邮件验证。
+
+## v0.12.0
+
+按条计费与注册防护版本。共享 SaaS 实例的免费档主货币从字节换成条数（`maxMemosPerUser` / `maxMemoryItemsPerUser`），并新增厂商中立的注册验证码 seam（`none` / `http` / `tencent`），为公开注册铺路。
+
+### 新增能力
+
+- Per-user 存量条数限额（#115）：`UserPlanLimits` 新增 `maxMemosPerUser`（memo 按 normal+archived 计，回收站不算）与 `maxMemoryItemsPerUser`（memory 按 active+archived 计）。检查在 domain `createMemo` / `createMemory` 内部（`QuotaScope` 沿 checkpoint / createMemoryFromMemo / promoteMemoryToMemo 透传），全部 9 条创建路由 + 两条导入路径（按 bundle 条数预检）已接线。恰好满额允许、超出 429；`plan.user` 段与账户面板新增「笔记条数 / Agent 记忆条数」两行。
+- `parseUserPlanLimits` 放宽：缺键解析为 null（回落到部署级限额），仅当载荷无任何有效键才视为未配置——null 从不等于 unlimited。
+- 注册验证码 seam（#116）：`FLAREMO_CAPTCHA_PROVIDER` = `none`（默认）/ `http`（POST {ticket,randstr,ip} 到 `FLAREMO_CAPTCHA_VERIFY_URL`，任意平台可经此接入）/ `tencent`（腾讯云验证码 2.0，TC3-HMAC-SHA256 签名调 DescribeCaptchaResult，国内可达）。site key 走变量、secret 走 Wrangler secret；配置缺失 fail-closed。覆盖 Web / Memos current signup / Connect SignUp 三条注册路径；bootstrap 与管理端建号豁免。注册页按 `/register/status` 返回的 provider 动态加载腾讯控件（懒加载）或阻塞提交直至 ticket 头存在。
+- Projects/Tasks/引用关系/回顾/导入导出/MCP 接入**不设限**（零边际成本，设限只添摩擦）。
+
+### Memos 兼容面变化
+
+- `/api/v1/*` 兼容面不变。429/403 仅在部署显式配置 per-user 条数限额或验证码时出现。
+
+### Cloudflare、数据库与认证影响
+
+- 无数据库 migration、无新增必需资源。新增可选变量：`FLAREMO_CAPTCHA_PROVIDER` / `FLAREMO_CAPTCHA_SITE_KEY` / `FLAREMO_CAPTCHA_VERIFY_URL`；新增可选 secrets：`FLAREMO_CAPTCHA_SECRET_ID` / `FLAREMO_CAPTCHA_SECRET`（tencent 用）。
+- 启用验证码后，浏览器注册必须携带 ticket（Web 页自动处理）；无验证码配置时行为与 v0.11.0 完全一致。
+
+### 升级说明
+
+- 自托管直接 `pnpm deploy`，零配置，行为不变。
+- 公开 SaaS 实例（app.flaremo.app）建议配置 per-user 限额与验证码后再开放注册。
+
+## v0.11.0
+
+Per-user 限额版本。为「公开注册、多用户共享一个部署」的 SaaS 形态补上按用户计量的限额层：在部署级 PlanLimits 之上新增 `UserPlanLimits`（存储 / embedding tokens / 语义搜索三个维度），生效优先级 per-user → 部署级 → 不限量。自托管不配置 per-user 载荷时行为与 v0.10.0 完全一致。
+
+### 新增能力
+
+- `UserPlanLimits` 注入层（#114）：`createFlareMoApp` 新增 `resolveUserPlanLimits(env, userId)` 选项，或直接用 `FLAREMO_USER_LIMITS_JSON` 环境变量（严格解析：畸形/缺键载荷视为「未配置」，绝不部分生效成不限量）。成员数上限保持部署级，不做 per-user 形态。
+- #109 的全部执行点（上传、导入、语义搜索、memory_recall、embedding outbox）按 scope 生效：per-user 限额生效时按该用户的用量判断（`usage_counters` 本就按 user 分桶，附件存储按 userId 求和）；outbox 按任务归属用户逐任务判断，一个用户预算耗尽不影响其他用户。
+- `/api/app/usage/vector` 的 `plan` 段在配置 per-user 限额时附带 `user` 子段；账户用量面板新增「个人限额」分组（部署限额分组改名「部署限额」）。
+
+### Memos 兼容面变化
+
+- `/api/v1/*` 兼容面不变。新增的 429 仅在部署显式配置 per-user 限额且该用户超限时出现。
+
+### Cloudflare、数据库与认证影响
+
+- 无数据库 migration、无新增 Cloudflare 资源、无必需的 secret 变化。
+- 需要按用户限额的部署：给 Worker 增加 `FLAREMO_USER_LIMITS_JSON` 变量（非 secret）；不需要则什么都不用做。
+
+### 升级说明
+
+- 自托管直接 `pnpm deploy`，无需任何步骤，行为不变。
+- 公开 SaaS 实例（app.flaremo.app）升级后建议配置 per-user 限额再继续开放注册。
+
+## v0.10.0
+
+开放内核与计划限额版本。这个版本为 SaaS 双仓架构打下地基：AGPL-3.0-only 许可证、`createFlareMoApp` 组装工厂、可注入的 `PlanLimits` 在内核四个执行点被真正执行（附件存储 / 月度 embedding tokens / 月度语义搜索 / 成员数），并新增内核导入边界架构测试。自托管部署行为完全不变（限额全 null = 不限量）；托管形态的差异化从这一版起纯粹是控制面返回的数字差异。
+
+### 新增能力
+
+- 许可证从 MIT 切换为 **AGPL-3.0-only**（#103）：全部 9 个包 SPDX 更新，README/CONTRIBUTING 写明版权人双许可权利与商标条款。
+- `createFlareMoApp(options)` 工厂（#105）：worker 路由表不再挂模块级常量，每次调用返回全新 Hono 实例；接受可选 `resolvePlanLimits(env)`，默认恒返回 `SELF_HOST_UNLIMITED`，解析结果经中间件写入 Hono Variables 并随请求上下文 `limits` 字段可用。
+- 计划限额真实执行（#109，`packages/domain/src/quotas.ts`）：
+  - 附件存储总量：三条上传路径 + 两条导入路径在写入 R2 前预检，超限返回 429；
+  - 月度 embedding tokens：outbox 每次 embed 成功后按估算 token（`ceil(chars/4)`）写入 `usage_counters`；预算耗尽时 sweep 暂停认领（任务保持 pending、不消耗重试次数，次月自动恢复）；全量重建只计量不阻断；
+  - 月度语义搜索：新增 `search_queries` 指标，`/api/app/search/semantic` 与 `memory_recall` 语义路径在 embed 前检查，超限 429；
+  - 成员数上限：Web 注册 / 管理员建号 / Memos 注册路径统一预检，注册在 Better Auth 身份创建之前预检以避免孤儿身份；429 在四套错误映射中透传。
+- `/api/app/usage/vector` 响应新增 `plan` 段（四维度 used/limit），账户用量面板渲染限额进度条（limit 为 null 不渲染）。
+- 内核导入边界架构测试（#107）：机械约束支付依赖不得进入内核、第三方导入必须注册在 workspace package、禁止非 registry 依赖声明。
+
+### 营销站与文档镜像（apps/site）
+
+- 新增 `apps/site` 包：FlareMo 官方营销站与文档镜像，部署到 `flaremo.app`，与主 Worker `flaremo` 完全解耦。
+- 技术栈与 `apps/web` 完全同构：React 19 + Vite + TanStack Router（code-based）+ Tailwind CSS 4；构建期 SSG，每个路由产出完整静态 HTML，客户端 hydrate。
+- 首页 / 定价页 / 文档镜像 / Hosted 占位 / 完整 SEO（sitemap、JSON-LD、hreflang、OG image）。
+
+### Memos 兼容面变化
+
+- `/api/v1/*` 兼容面不变；新增的 429 仅在部署显式注入限额时出现，自托管（不注入）永远不会触发。
+- 认证与 Origin 校验语义不变：cookie session 状态变更仍要求精确 Origin 匹配，PAT 请求语义不变。
+
+### Cloudflare、数据库与认证影响
+
+- 无数据库 migration、无新增 Cloudflare 资源、无新增 env var 或 secret 要求。
+- `apps/site` 为独立 Worker `flaremo-site`，用 `pnpm deploy:site` 单独部署，不触发主 Worker。
+- Better Auth 配置不动；`FLAREMO_PUBLIC_URL` / `FLAREMO_TRUSTED_ORIGINS` 语义不变。
+
+### 升级说明
+
+- 自托管用户直接 `pnpm deploy` 即可；无需任何迁移步骤，行为与 v0.9.0 一致。
+- `pnpm release v0.10.0` 与 Deploy Button 用户仓库的升级 PR 自动消费本 Release。
+- 后续托管形态通过私有控制面组合本内核，不影响公开仓升级路径。
+
 ## v0.9.0
 
 账户邮箱自助修改版本。这个版本在无邮件基础设施的前提下，为账户设置页新增"修改邮箱"能力：修改登录邮箱前必须验证当前密码（避免裸改登录标识），改邮箱不引入邮件服务，验证步骤集中在 route 层，未来接入邮件 OTP 时可替换而不改路由契约。

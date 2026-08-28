@@ -1,13 +1,15 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { Link, Navigate, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import {
   getBootstrapStatus,
   getRegistrationStatus,
   registerAccount,
+  resendVerificationEmail,
 } from "@/api";
 import { authClient } from "@/auth-client";
 import { AuthPageFrame, errorMessage } from "@/components/auth-page-frame";
+import { CaptchaField } from "@/components/captcha-field";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useI18n } from "@/i18n";
@@ -34,6 +36,14 @@ export function RegisterPage() {
   const [passwordConfirmation, setPasswordConfirmation] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [captchaTicket, setCaptchaTicket] = useState<string | null>(null);
+  const [captchaRandstr, setCaptchaRandstr] = useState("");
+  const [registeredEmail, setRegisteredEmail] = useState<string | null>(null);
+  const [resent, setResent] = useState(false);
+  const resendMutation = useMutation({
+    mutationFn: resendVerificationEmail,
+    onSuccess: () => setResent(true),
+  });
 
   if (session.data?.user) {
     return (
@@ -65,16 +75,34 @@ export function RegisterPage() {
       return;
     }
 
+    const captcha = registrationQuery.data?.captcha;
+    if (captcha && captcha.provider !== "none" && !captchaTicket) {
+      setFormError(t("auth.captchaRequired"));
+      return;
+    }
+
     setFormError(null);
     setIsSubmitting(true);
     try {
-      await registerAccount({
-        name: name.trim(),
-        email: email.trim(),
-        password,
-      });
+      await registerAccount(
+        {
+          name: name.trim(),
+          email: email.trim(),
+          password,
+        },
+        captcha && captcha.provider !== "none" && captchaTicket
+          ? { ticket: captchaTicket, randstr: captchaRandstr }
+          : undefined,
+      );
       setPassword("");
       setPasswordConfirmation("");
+      // With a transactional-email provider the account needs verification
+      // before it is fully usable; show the check-your-inbox state instead of
+      // silently dropping the user at the login form.
+      if (registrationQuery.data?.email_verification_required) {
+        setRegisteredEmail(email.trim());
+        return;
+      }
       await navigate({ replace: true, to: "/login" });
     } catch (error) {
       setFormError(errorMessage(error, t("auth.registerFailed")));
@@ -82,6 +110,48 @@ export function RegisterPage() {
       setIsSubmitting(false);
     }
   };
+
+  if (registeredEmail) {
+    return (
+      <AuthPageFrame title={t("auth.verifyEmailTitle")}>
+        <div className="flex flex-col gap-3">
+          <p className="text-sm leading-6 text-muted-foreground">
+            {t("auth.verifyEmailSent")}{" "}
+            <span className="font-medium text-foreground">
+              {registeredEmail}
+            </span>
+          </p>
+          <p className="text-sm leading-6 text-muted-foreground">
+            {t("auth.verifyEmailHint")}
+          </p>
+          {resent ? (
+            <p className="text-sm leading-6 text-emerald-700 dark:text-emerald-300">
+              {t("auth.resendVerificationSent")}
+            </p>
+          ) : (
+            <Button
+              disabled={resendMutation.isPending || !registeredEmail}
+              onClick={() =>
+                registeredEmail &&
+                void resendMutation.mutateAsync(registeredEmail)
+              }
+              variant="outline"
+            >
+              {resendMutation.isPending
+                ? t("auth.resendVerificationSending")
+                : t("auth.resendVerification")}
+            </Button>
+          )}
+          <Link
+            className="text-sm font-medium text-flame-600 underline-offset-4 hover:underline"
+            to="/login"
+          >
+            {t("auth.signIn")}
+          </Link>
+        </div>
+      </AuthPageFrame>
+    );
+  }
 
   return (
     <AuthPageFrame title={t("auth.registerTitle")}>
@@ -176,6 +246,19 @@ export function RegisterPage() {
             />
           </label>
         </div>
+        {registrationQuery.data?.captcha &&
+          registrationQuery.data.captcha.provider !== "none" && (
+            <CaptchaField
+              disabled={isSubmitting}
+              onTicket={(ticket, randstr) => {
+                setCaptchaTicket(ticket);
+                setCaptchaRandstr(randstr);
+                setFormError(null);
+              }}
+              provider={registrationQuery.data.captcha.provider}
+              siteKey={registrationQuery.data.captcha.site_key}
+            />
+          )}
         {formError && (
           <p className="rounded-lg border border-destructive/30 bg-destructive/8 px-3 py-2 text-sm text-destructive">
             {formError}

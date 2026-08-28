@@ -1,15 +1,21 @@
 import { createDb } from "@flaremo/db";
 import {
+  assertMemberQuota,
   claimOwnerBootstrap,
   completeOwnerBootstrap,
   createFlaremoMemberWithLink,
   deriveUniqueUsername,
   getAuthBootstrapStatus,
+  getFlaremoUserByAuthUserId,
   getOwnerAuthUserId,
   getUserRegistrationAllowed,
   listMemosPersonalAccessTokens,
   markOwnerBootstrapRecoveryRequired,
+  NotFoundError,
+  QuotaExceededError,
   reconcileOwnerBootstrap,
+  SELF_HOST_UNLIMITED,
+  updateFlaremoUserEmail,
 } from "@flaremo/domain";
 import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
@@ -17,10 +23,19 @@ import { z } from "zod";
 import {
   createFlareMoAuth,
   getBootstrapSecret,
+  getPublicUrl,
   getRecoverySecret,
 } from "../auth";
+import { resolveCaptchaConfig, verifyCaptchaRequest } from "../captcha";
 import type { HonoBindings } from "../context";
+import {
+  resolveEmailConfig,
+  sendEmailChangeVerificationEmail,
+  sendPasswordResetEmail,
+  sendVerificationEmail,
+} from "../email";
 import { jsonError } from "../http";
+import { rateLimitGuard } from "../rate-limit";
 
 export const authApi = new Hono<HonoBindings>();
 
@@ -64,13 +79,21 @@ authApi.get("/bootstrap/status", async (c) => {
 authApi.get("/register/status", async (c) => {
   const db = createDb(c.env.DB);
   const status = await getAuthBootstrapStatus(db);
+  const captcha = resolveCaptchaConfig(c.env);
   return c.json({
     registration_open: await getUserRegistrationAllowed(db),
     initialized: status.initialized,
+    email_verification_required: resolveEmailConfig(c.env).provider !== "none",
+    captcha: {
+      provider: captcha.provider,
+      site_key: captcha.siteKey,
+    },
   });
 });
 
 authApi.post("/register", zValidator("json", registerSchema), async (c) => {
+  const throttled = await rateLimitGuard(c, "register");
+  if (throttled) return throttled;
   const db = createDb(c.env.DB);
   const status = await getAuthBootstrapStatus(db);
   if (status.state !== "complete") {
@@ -86,9 +109,24 @@ authApi.post("/register", zValidator("json", registerSchema), async (c) => {
     );
   }
 
+  try {
+    await verifyCaptchaRequest(c.env, c.req.raw);
+  } catch (error) {
+    return jsonError(c, error);
+  }
   const input = c.req.valid("json");
   const email = input.email.trim();
   const username = await deriveUniqueUsername(db, email);
+  // Pre-check before the Better Auth identity exists: failing only at link
+  // time would orphan an auth user on a spent member quota.
+  try {
+    await assertMemberQuota(db, c.get("planLimits") ?? SELF_HOST_UNLIMITED);
+  } catch (error) {
+    if (error instanceof QuotaExceededError) {
+      return c.json({ error: { message: error.message } }, 429);
+    }
+    throw error;
+  }
   let auth: ReturnType<typeof createFlareMoAuth>;
   try {
     auth = createFlareMoAuth(c.env, db, { allowBootstrapSignUp: true });
@@ -109,17 +147,202 @@ authApi.post("/register", zValidator("json", registerSchema), async (c) => {
         displayUsername: input.name,
       },
     });
-    await createFlaremoMemberWithLink(db, {
-      authUserId: result.user.id,
-      email,
-      name: input.name,
-    });
+    await createFlaremoMemberWithLink(
+      db,
+      {
+        authUserId: result.user.id,
+        email,
+        name: input.name,
+      },
+      c.get("planLimits") ?? SELF_HOST_UNLIMITED,
+    );
+    // When a transactional-email provider is configured, registration is not
+    // complete until the address is verified; the account can still sign in
+    // but the UI prompts for verification.
+    if (resolveEmailConfig(c.env).provider !== "none") {
+      const token = await auth.createEmailVerificationToken(result.user.id);
+      const sent = await sendVerificationEmail(c.env, {
+        to: email,
+        token,
+        publicUrl: getPublicUrl(c.env),
+      });
+      if (!sent) {
+        return c.json(
+          { error: { message: "Verification email could not be sent." } },
+          502,
+        );
+      }
+    }
     return c.json({ ok: true }, 201);
-  } catch {
+  } catch (error) {
+    // A spent member quota must surface as its own status, not drown in the
+    // generic "registration failed" path that hides Better Auth internals.
+    if (error instanceof QuotaExceededError) {
+      return c.json({ error: { message: error.message } }, 429);
+    }
     return c.json(
       { error: { message: "Registration could not be completed." } },
       400,
     );
+  }
+});
+
+authApi.get("/verify-email", async (c) => {
+  const token = c.req.query("token");
+  if (!token) {
+    return c.json({ error: { message: "Missing verification token." } }, 400);
+  }
+  const db = createDb(c.env.DB);
+  const auth = createFlareMoAuth(c.env, db);
+  const authUserId = await auth.consumeEmailVerificationToken(token);
+  if (!authUserId) {
+    return c.json(
+      { error: { message: "Verification link is invalid or expired." } },
+      400,
+    );
+  }
+  await auth.markEmailVerified(authUserId);
+  return c.json({ ok: true });
+});
+
+const emailRequestSchema = z.object({
+  email: z.string().trim().email().max(320),
+});
+
+authApi.post(
+  "/resend-verification",
+  zValidator("json", emailRequestSchema),
+  async (c) => {
+    const throttled = await rateLimitGuard(c, "email");
+    if (throttled) return throttled;
+    if (resolveEmailConfig(c.env).provider === "none") {
+      return c.json(
+        { error: { message: "Email verification is not enabled." } },
+        400,
+      );
+    }
+    const db = createDb(c.env.DB);
+    let auth: ReturnType<typeof createFlareMoAuth>;
+    try {
+      auth = createFlareMoAuth(c.env, db);
+    } catch {
+      return c.json(
+        { error: { message: "Native authentication is not configured." } },
+        503,
+      );
+    }
+    try {
+      const input = c.req.valid("json");
+      const user = await auth.findAuthUserByEmail(input.email);
+      // Unknown addresses and already-verified identities share the same
+      // success shape so this endpoint cannot enumerate accounts.
+      if (!user || user.emailVerified) {
+        return c.json({ ok: true });
+      }
+      const token = await auth.createEmailVerificationToken(user.id);
+      const sent = await sendVerificationEmail(c.env, {
+        to: user.email,
+        token,
+        publicUrl: getPublicUrl(c.env),
+      });
+      if (!sent) {
+        return c.json(
+          { error: { message: "Verification email could not be sent." } },
+          502,
+        );
+      }
+      return c.json({ ok: true });
+    } catch (error) {
+      return jsonError(c, error);
+    }
+  },
+);
+
+authApi.post(
+  "/forgot-password",
+  zValidator("json", emailRequestSchema),
+  async (c) => {
+    const throttled = await rateLimitGuard(c, "email");
+    if (throttled) return throttled;
+    if (resolveEmailConfig(c.env).provider === "none") {
+      return c.json(
+        { error: { message: "Password reset email is not configured." } },
+        400,
+      );
+    }
+    const db = createDb(c.env.DB);
+    let auth: ReturnType<typeof createFlareMoAuth>;
+    try {
+      auth = createFlareMoAuth(c.env, db);
+    } catch {
+      return c.json(
+        { error: { message: "Native authentication is not configured." } },
+        503,
+      );
+    }
+    try {
+      const input = c.req.valid("json");
+      const user = await auth.findAuthUserByEmail(input.email);
+      // The response never distinguishes known from unknown addresses so the
+      // endpoint cannot be used to enumerate registered emails.
+      if (!user) {
+        return c.json({ ok: true });
+      }
+      const token = await auth.createPasswordResetToken(user.id);
+      const sent = await sendPasswordResetEmail(c.env, {
+        to: user.email,
+        token,
+        publicUrl: getPublicUrl(c.env),
+      });
+      if (!sent) {
+        return c.json(
+          { error: { message: "Password reset email could not be sent." } },
+          502,
+        );
+      }
+      return c.json({ ok: true });
+    } catch (error) {
+      return jsonError(c, error);
+    }
+  },
+);
+
+authApi.get("/verify-email-change", async (c) => {
+  const token = c.req.query("token");
+  if (!token) {
+    return c.json({ error: { message: "Missing verification token." } }, 400);
+  }
+  const db = createDb(c.env.DB);
+  const auth = createFlareMoAuth(c.env, db);
+  const change = await auth.consumeEmailChangeToken(token);
+  if (!change) {
+    return c.json(
+      { error: { message: "Verification link is invalid or expired." } },
+      400,
+    );
+  }
+  try {
+    // Re-check occupancy at confirmation time: the target address may have
+    // been claimed between the change request and this click.
+    const existing = await auth.findAuthUserByEmail(change.newEmail);
+    if (existing && existing.id !== change.authUserId) {
+      return c.json(
+        { error: { message: "That email is already in use." } },
+        409,
+      );
+    }
+    const flaremoUser = await getFlaremoUserByAuthUserId(db, change.authUserId);
+    if (!flaremoUser) {
+      throw new NotFoundError("Account not found");
+    }
+    await auth.changeEmail({
+      currentEmail: change.currentEmail,
+      newEmail: change.newEmail,
+    });
+    await updateFlaremoUserEmail(db, flaremoUser, change.newEmail);
+    return c.json({ ok: true });
+  } catch (error) {
+    return jsonError(c, error);
   }
 });
 

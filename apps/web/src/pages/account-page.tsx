@@ -14,6 +14,7 @@ import { useEffect, useState } from "react";
 import {
   changeEmail,
   createPersonalAccessToken,
+  deleteAccount,
   getCurrentFlareMoUser,
   getVectorUsage,
   listPersonalAccessTokens,
@@ -55,6 +56,19 @@ export function AccountPage() {
   const [accountError, setAccountError] = useState<string | null>(null);
   const [passwordError, setPasswordError] = useState<string | null>(null);
   const [emailError, setEmailError] = useState<string | null>(null);
+  const [emailVerificationPending, setEmailVerificationPending] =
+    useState(false);
+  const [deletePassword, setDeletePassword] = useState("");
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const deleteAccountMutation = useMutation({
+    mutationFn: deleteAccount,
+    onSuccess: async () => {
+      // The server deleted the account; every cached query is stale.
+      queryClient.clear();
+      await authClient.signOut().catch(() => undefined);
+      await navigate({ replace: true, to: "/login" });
+    },
+  });
   const [tokenError, setTokenError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
@@ -103,7 +117,10 @@ export function AccountPage() {
   });
   const changeEmailMutation = useMutation({
     mutationFn: changeEmail,
-    onSuccess: async () => {
+    onSuccess: async (result) => {
+      // With an email provider configured the change is only staged: the new
+      // address must confirm ownership before the login identity switches.
+      setEmailVerificationPending(result.verification_sent === true);
       await session.refetch();
     },
   });
@@ -162,6 +179,7 @@ export function AccountPage() {
 
   const handleEmailSubmit = async () => {
     setEmailError(null);
+    setEmailVerificationPending(false);
     try {
       await changeEmailMutation.mutateAsync({
         current_password: emailCurrentPassword,
@@ -403,6 +421,11 @@ export function AccountPage() {
                 <CardTitle>{t("auth.emailTitle")}</CardTitle>
               </CardHeader>
               <CardContent>
+                {emailVerificationPending && (
+                  <p className="mb-3 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-800 dark:text-emerald-200">
+                    {t("auth.emailChangeVerificationSent")}
+                  </p>
+                )}
                 <form
                   className="grid gap-3 sm:grid-cols-2"
                   onSubmit={(event) => {
@@ -462,6 +485,69 @@ export function AccountPage() {
                 </form>
               </CardContent>
             </Card>
+            {!isOwner && (
+              <Card className="border-destructive/30">
+                <CardHeader>
+                  <CardTitle>{t("auth.deleteAccountTitle")}</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <form
+                    className="flex flex-col gap-3"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      setDeleteError(null);
+                      void deleteAccountMutation
+                        .mutateAsync(deletePassword)
+                        .then(() => setDeletePassword(""))
+                        .catch((error: unknown) => {
+                          setDeleteError(
+                            errorMessage(error, t("auth.deleteAccountFailed")),
+                          );
+                        });
+                    }}
+                  >
+                    <p className="text-sm leading-6 text-muted-foreground">
+                      {t("auth.deleteAccountDescription")}
+                    </p>
+                    <label
+                      className="flex flex-col gap-1.5 text-sm font-medium"
+                      htmlFor="account-delete-password"
+                    >
+                      {t("auth.deleteAccountPassword")}
+                      <Input
+                        autoComplete="current-password"
+                        disabled={deleteAccountMutation.isPending}
+                        id="account-delete-password"
+                        required
+                        type="password"
+                        value={deletePassword}
+                        onChange={(event) =>
+                          setDeletePassword(event.target.value)
+                        }
+                      />
+                    </label>
+                    {deleteError && (
+                      <p className="rounded-lg border border-destructive/30 bg-destructive/8 px-3 py-2 text-sm text-destructive">
+                        {deleteError}
+                      </p>
+                    )}
+                    <Button
+                      className="w-fit"
+                      disabled={
+                        deleteAccountMutation.isPending ||
+                        deletePassword.length === 0
+                      }
+                      type="submit"
+                      variant="destructive"
+                    >
+                      {deleteAccountMutation.isPending
+                        ? t("auth.deleteAccountSubmitting")
+                        : t("auth.deleteAccountSubmit")}
+                    </Button>
+                  </form>
+                </CardContent>
+              </Card>
+            )}
           </TabsContent>
 
           <TabsContent value="tokens" className="mt-4">
@@ -670,27 +756,162 @@ function VectorUsagePanel({
         used={report.queried_dimensions_this_month}
         limit={report.queried_limit}
       />
+      {report.plan && <PlanQuotaBars plan={report.plan} t={t} />}
       <p className="text-xs text-muted-foreground">{t("usage.disclaimer")}</p>
     </div>
   );
+}
+
+// Used-vs-limit rows for the injectable plan quotas. Rows with a null limit
+// (self-hosted default) stay hidden so the panel stays noise-free; when every
+// limit is null there is nothing to render.
+type QuotaRow = {
+  key: TranslationKey;
+  used: number;
+  limit: number | null;
+  format: (value: number) => string;
+};
+
+const localeFormat = (value: number) => value.toLocaleString();
+
+function PlanQuotaBars({
+  plan,
+  t,
+}: {
+  plan: NonNullable<VectorUsageReport["plan"]>;
+  t: (key: TranslationKey) => string;
+}) {
+  const userRows: QuotaRow[] | null = plan.user
+    ? [
+        {
+          key: "usage.planStorage",
+          used: plan.user.usage.attachmentStorageBytes,
+          limit: plan.user.limits.attachmentStorageBytes,
+          format: formatBytes,
+        },
+        {
+          key: "usage.planEmbeddingTokens",
+          used: plan.user.usage.aiEmbeddingTokensPerMonth,
+          limit: plan.user.limits.aiEmbeddingTokensPerMonth,
+          format: localeFormat,
+        },
+        {
+          key: "usage.planSearchQueries",
+          used: plan.user.usage.semanticSearchQueriesPerMonth,
+          limit: plan.user.limits.semanticSearchQueriesPerMonth,
+          format: localeFormat,
+        },
+        {
+          key: "usage.planMemos",
+          used: plan.user.usage.maxMemosPerUser,
+          limit: plan.user.limits.maxMemosPerUser,
+          format: localeFormat,
+        },
+        {
+          key: "usage.planMemories",
+          used: plan.user.usage.maxMemoryItemsPerUser,
+          limit: plan.user.limits.maxMemoryItemsPerUser,
+          format: localeFormat,
+        },
+      ]
+    : null;
+  const userLimited = userRows?.filter((row) => row.limit !== null) ?? [];
+
+  const deploymentRows: QuotaRow[] = [
+    {
+      key: "usage.planStorage",
+      used: plan.usage.attachmentStorageBytes,
+      limit: plan.limits.attachmentStorageBytes,
+      format: formatBytes,
+    },
+    {
+      key: "usage.planEmbeddingTokens",
+      used: plan.usage.aiEmbeddingTokensPerMonth,
+      limit: plan.limits.aiEmbeddingTokensPerMonth,
+      format: localeFormat,
+    },
+    {
+      key: "usage.planSearchQueries",
+      used: plan.usage.semanticSearchQueriesPerMonth,
+      limit: plan.limits.semanticSearchQueriesPerMonth,
+      format: localeFormat,
+    },
+    {
+      key: "usage.planMembers",
+      used: plan.usage.maxMembersPerDeployment,
+      limit: plan.limits.maxMembersPerDeployment,
+      format: localeFormat,
+    },
+  ];
+  const deploymentLimited = deploymentRows.filter((row) => row.limit !== null);
+
+  if (userLimited.length === 0 && deploymentLimited.length === 0) return null;
+  return (
+    <div className="flex flex-col gap-3 border-t pt-4">
+      {userLimited.length > 0 && (
+        <>
+          <p className="text-sm font-medium">{t("usage.planUserTitle")}</p>
+          {userLimited.map((row) => (
+            <UsageBar
+              key={`user-${row.key}`}
+              label={t(row.key)}
+              used={row.used}
+              limit={row.limit as number}
+              formatValue={row.format}
+            />
+          ))}
+        </>
+      )}
+      {deploymentLimited.length > 0 && (
+        <>
+          <p className="text-sm font-medium">{t("usage.planTitle")}</p>
+          {deploymentLimited.map((row) => (
+            <UsageBar
+              key={`deployment-${row.key}`}
+              label={t(row.key)}
+              used={row.used}
+              limit={row.limit as number}
+              formatValue={row.format}
+            />
+          ))}
+        </>
+      )}
+    </div>
+  );
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes >= 1024 ** 3) {
+    return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
+  }
+  if (bytes >= 1024 ** 2) {
+    return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+  }
+  if (bytes >= 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB`;
+  }
+  return `${bytes} B`;
 }
 
 function UsageBar({
   label,
   used,
   limit,
+  formatValue,
 }: {
   label: string;
   used: number;
   limit: number;
+  formatValue?: (value: number) => string;
 }) {
+  const format = formatValue ?? ((value: number) => value.toLocaleString());
   const percent = limit > 0 ? Math.min(100, (used / limit) * 100) : 0;
   return (
     <div className="flex flex-col gap-1.5">
       <div className="flex items-baseline justify-between text-sm">
         <span>{label}</span>
         <span className="text-muted-foreground tabular-nums">
-          {used.toLocaleString()} / {limit.toLocaleString()}
+          {format(used)} / {format(limit)}
         </span>
       </div>
       <div className="h-2 w-full overflow-hidden rounded-full bg-muted">

@@ -157,7 +157,9 @@ Better Auth 是 FlareMo 的应用层认证事实源，按请求使用当前 Work
 
 PAT 由 cookie session 或 Better Auth session bearer 下的账户接口创建、列出和撤销，明文只在创建响应返回一次；`memos_pat_` 本身只能访问私有业务数据，不能调用账户 PAT 管理接口。`memos_pat_` 是 FlareMo-native credential，用于保护当前兼容 API 子集，不代表 Memos Server 的完整 auth parity。
 
-当前没有 email provider，因此 Better Auth 的自助忘记密码流程保持关闭。密码恢复走管理员兜底：owner 在后台为成员生成一次性重置链接（`auth_verifications` 存 token，用户自行设密，管理员不接触明文）；owner 自己忘记密码时，可用独立 `FLAREMO_RECOVERY_SECRET` 走 `/recover` 页面进入 Better Auth reset-password 流程。恢复成功后撤销全部 session 和 PAT，不创建第二个用户。该 secret 不是登录凭据，恢复结束后必须立即轮换或删除。
+邮件能力是可选 seam（`FLAREMO_EMAIL_PROVIDER`）：`none`（自托管默认，零配置）或 `cloudflare`（Workers Paid 的 `EMAIL` binding）。provider 为 `cloudflare` 时，浏览器注册强制邮箱验证（24 小时一次性 token），并解锁三个自助流程：重发验证邮件、邮件找回密码（1 小时 token，走 Better Auth 原生 reset-password，成功后撤销全部 session）、换邮箱验证新地址（确认前旧邮箱继续有效）。此时 Memos 兼容注册面（current `/api/v1/auth/signup`、Connect `AuthService.SignUp`）返回 403，因为兼容客户端无法完成邮箱验证流程。provider 为 `none` 时这些流程全部退回原行为：注册不验证邮箱、密码恢复走管理员兜底（owner 在后台为成员生成一次性重置链接，`auth_verifications` 存 token，用户自行设密，管理员不接触明文）；owner 自己忘记密码时，可用独立 `FLAREMO_RECOVERY_SECRET` 走 `/recover` 页面进入 Better Auth reset-password 流程。恢复成功后撤销全部 session 和 PAT，不创建第二个用户。该 secret 不是登录凭据，恢复结束后必须立即轮换或删除。
+
+凭据端点支持可选的 per-IP 限频：部署通过 Cloudflare rate-limiting binding 绑定 `RATE_LIMITER` 后，注册、重发验证、忘记密码和 Better Auth 的 sign-in/sign-up/reset 路径按 IP 分桶节流（超限返回 429）；未绑定该 binding 的部署行为不变。binding 故障时 fail-open（放行并记录错误日志），限频是加固手段而非正确性闸门。
 
 Cloudflare Access 可以在这三层之前作为外层 policy。它只负责入口门禁，Access identity 或 Service Token 不会自动提供 FlareMo 应用用户身份；启用时请求仍需 cookie session 或 PAT。公开分享可在 Access 上对最窄路径做 bypass，但不跳过 FlareMo share token 校验。
 
@@ -419,6 +421,30 @@ AI 工作流围绕个人知识库展开：
 8. 维护 OpenAPI。
 9. 基于 OpenAPI 增加 MCP。
 10. 接入 Vectorize 和 AI 能力。
+
+## 组装入口与计划限额
+
+worker 的路由表不再挂在模块级常量上，而是由 `createFlareMoApp(options)` 工厂构建：每次调用返回全新 Hono 实例，default 导出的 `ExportedHandler` 只是该工厂的默认消费者。外部组合壳（未来 FlareMo 托管形态的私有入口）可以 import 同一工厂，追加自己的中间件与路由，不必复制或 patch 内核。
+
+计划限额以注入数据的形式进入请求上下文，而不是散落的条件分支：
+
+- domain 层的 `PlanLimits` 只包含「数字或 null」的字段；`SELF_HOST_UNLIMITED` 是自部署恒定值。domain 不知道订阅概念的存在。
+- `createFlareMoApp` 接受可选的 `resolvePlanLimits(env)`；默认实现恒返回 `SELF_HOST_UNLIMITED`，解析结果经每个请求首个中间件写入 Hono Variables（`planLimits`），`getRequestContext` 系列将其放入返回值的 `limits` 字段。
+- 超限场景使用 `QuotaExceededError`（HTTP 429），走既有 `DomainError` 映射。
+- 本仓库不实现任何订阅解析器；云端 resolver 属于私有控制面的注入物。
+
+限额不只是被注入，还在内核的四个执行点被真正执行（`packages/domain/src/quotas.ts`）：
+
+1. **附件存储总量**：三条上传路径与两条导入路径在写入 R2 前调用 `assertAttachmentStorageQuota`（对 `attachments` 表 `state='ready'` 求和，部署级）。
+2. **月度 embedding tokens**：outbox 每次 embed 成功后按 `estimateTokenCount`（`ceil(chars/4)` 估算）写入 `usage_counters`；预算耗尽时 sweep 暂停认领（任务保持 pending、不消耗重试次数，次月自动恢复）。全量重建只计量不阻断（恢复路径）。`dispatchEmbeddingOutbox` 的 `limits` 来自调用方——default handler 传 `SELF_HOST_UNLIMITED`，托管壳可在自己的 scheduled 入口注入真实限额。
+3. **月度语义搜索次数**：`/api/app/search/semantic` 与 `memory_recall` 语义路径在 embed 前检查 `search_queries` 月度计数（部署级求和），超限抛 429；成功后计入 `search_queries` 与查询 token 估算。
+4. **成员数上限**：`createFlaremoMemberWithLink` 接受可选 `limits`，Web 注册 / 管理员建号 / Memos 注册路径统一预检（注册路径在 Better Auth 身份创建**之前**预检，避免超限时产生孤儿身份）；`ensureSingleUser` bootstrap 永不受限。
+
+`/api/app/usage/vector` 响应附带 `plan`（`PlanUsageReport`：四维度的 used/limit），前端用量面板据此渲染限额进度条；limit 为 null（自托管）的行不渲染。限额为 null 时所有检查旁路，自托管行为零变化。
+
+**Per-user 限额（共享 SaaS 实例）**：部署级限额对「公开注册、多用户共享一个部署」的形态会锁死全体，因此内核还接受一层 per-user 限额（`UserPlanLimits`，只有存储/tokens/搜索三个维度——成员数天然是部署级，不做 per-user 形态）。注入途径：`createFlareMoApp` 的 `resolveUserPlanLimits(env, userId)` 选项，或 `FLAREMO_USER_LIMITS_JSON` 环境变量（用户无关的静态配置）。生效优先级 per-user → 部署级 → 不限量；per-user 生效时用量按该 user 读取（`usage_counters` 本就按 user 分桶，附件存储按 userId 过滤求和），outbox 也按任务归属用户判断预算。`plan` 响应在配置了 per-user 限额时附带 `user` 段，面板渲染「个人限额」分组。
+
+**存量条数维度**：`UserPlanLimits` 另有 `maxMemosPerUser` / `maxMemoryItemsPerUser`（共享实例按条计费的主货币）。条数是存量口径——memo 按 `normal + archived` 计（回收站不算），memory 按 `active + archived` 计。检查在 domain `createMemo` / `createMemory` 内部执行（可选 `scope` 参数沿调用链透传），导入路径以 bundle 条数预检；`additionalCount` 默认 1 表示「一次写入即将发生」，恰好满额允许、超出才 429。Projects/Tasks/引用关系/回顾/导入导出/MCP 接入是零边际成本能力，**不设限**。
 
 ## 结论
 
