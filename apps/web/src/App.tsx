@@ -1,76 +1,39 @@
-import type { ListMemosResponse } from "@flaremo/contracts";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import { Link, useNavigate } from "@tanstack/react-router";
 import {
-  type InfiniteData,
-  type QueryClient,
-  type QueryKey,
-  useInfiniteQuery,
-  useMutation,
-  useQuery,
-  useQueryClient,
-} from "@tanstack/react-query";
-import {
-  createRootRoute,
-  createRoute,
-  createRouter,
-  Link,
-  Navigate,
-  Outlet,
-  RouterProvider,
-  useNavigate,
-  useRouter,
-} from "@tanstack/react-router";
-import {
+  CalendarIcon,
   DownloadIcon,
   LanguagesIcon,
   MenuIcon,
-  SearchIcon,
   SettingsIcon,
-  SparklesIcon,
   UploadIcon,
+  XIcon,
 } from "lucide-react";
-import {
-  lazy,
-  type ReactNode,
-  type RefObject,
-  Suspense,
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
-  ApiError,
-  AUTHENTICATION_REQUIRED_EVENT,
-  createExportTask,
-  createImportTask,
-  createMemo,
-  createShare,
-  deleteTag,
-  downloadExportJson,
-  getDataTask,
   getMemoStats,
   getTagHierarchy,
-  hardDeleteMemo,
+  getVectorUsage,
   listMemos,
-  type Memo,
-  type MemoState,
   type MemoStatsResponse,
-  renameTag,
-  type Share,
+  type MemoVisibility,
   semanticSearchMemos,
-  trashMemo,
-  updateMemo,
-  uploadAttachment,
 } from "@/api";
-import { authClient } from "@/auth-client";
+import type { ExplorerView as ViewMode } from "@/components/flaremo-explorer";
 import { FlareMoExplorer } from "@/components/flaremo-explorer";
-import type { MemoView as ViewMode } from "@/components/flaremo-sidebar";
-import { MemoComposer } from "@/components/memo-composer";
+import { InfoTip } from "@/components/info-tip";
 import { MemoList } from "@/components/memo-list";
 import { NotificationBell } from "@/components/notification-bell";
+import { PwaUpdatePrompt } from "@/components/pwa-update-prompt";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import {
   Sheet,
@@ -78,96 +41,16 @@ import {
   SheetTitle,
   SheetTrigger,
 } from "@/components/ui/sheet";
-import { Toaster } from "@/components/ui/sonner";
-import { TooltipProvider } from "@/components/ui/tooltip";
 import { UpdateStatus } from "@/components/update-status";
-import { useDebouncedValue } from "@/hooks/use-debounced-value";
-import { useNewMemoCapture } from "@/hooks/use-new-memo-capture";
+import { WorkspaceComposer } from "@/components/workspace-composer";
+import { WorkspaceSearch } from "@/components/workspace-search";
+import { useDataTransfer } from "@/hooks/use-data-transfer";
+import { useMemoMutations, viewToMemoState } from "@/hooks/use-memo-mutations";
 import { type TranslationKey, useI18n } from "@/i18n";
-import {
-  enqueueMemoSubmission,
-  flushQueuedMemoSubmissions,
-  getNewMemoDraftId,
-  isBrowserOnline,
-  type MemoCaptureInput,
-} from "@/lib/local-memo-capture";
+import { dayFilterFromQuery, formatDayTitle } from "@/lib/calendar-date";
 import { cn } from "@/lib/utils";
-
-const MemoDetailPage = lazy(() =>
-  import("@/pages/memo-detail-page").then((module) => ({
-    default: module.MemoDetailPage,
-  })),
-);
-const PublicSharePage = lazy(() =>
-  import("@/pages/public-share-page").then((module) => ({
-    default: module.PublicSharePage,
-  })),
-);
-const LoginPage = lazy(() =>
-  import("@/pages/login-page").then((module) => ({
-    default: module.LoginPage,
-  })),
-);
-const RegisterPage = lazy(() =>
-  import("@/pages/register-page").then((module) => ({
-    default: module.RegisterPage,
-  })),
-);
-const ResetPage = lazy(() =>
-  import("@/pages/reset-page").then((module) => ({
-    default: module.ResetPage,
-  })),
-);
-const VerifyEmailPage = lazy(() =>
-  import("@/pages/verify-email-page").then((module) => ({
-    default: module.VerifyEmailPage,
-  })),
-);
-const ForgotPasswordPage = lazy(() =>
-  import("@/pages/forgot-password-page").then((module) => ({
-    default: module.ForgotPasswordPage,
-  })),
-);
-const VerifyEmailChangePage = lazy(() =>
-  import("@/pages/verify-email-change-page").then((module) => ({
-    default: module.VerifyEmailChangePage,
-  })),
-);
-const RecoverPage = lazy(() =>
-  import("@/pages/recover-page").then((module) => ({
-    default: module.RecoverPage,
-  })),
-);
-const SetupPage = lazy(() =>
-  import("@/pages/setup-page").then((module) => ({
-    default: module.SetupPage,
-  })),
-);
-const AccountPage = lazy(() =>
-  import("@/pages/account-page").then((module) => ({
-    default: module.AccountPage,
-  })),
-);
-const DailyReviewPage = lazy(() =>
-  import("@/pages/daily-review-page").then((module) => ({
-    default: module.DailyReviewPage,
-  })),
-);
-const RandomWalkPage = lazy(() =>
-  import("@/pages/random-walk-page").then((module) => ({
-    default: module.RandomWalkPage,
-  })),
-);
-const MemoryPage = lazy(() =>
-  import("@/pages/memory-page").then((module) => ({
-    default: module.MemoryPage,
-  })),
-);
-const ProjectsPage = lazy(() =>
-  import("@/pages/projects-page").then((module) => ({
-    default: module.ProjectsPage,
-  })),
-);
+import { AppRoutes } from "@/router-tree";
+import { indexRoute, registerWorkspaceComponent } from "@/routes/index-route";
 
 const PAGE_SIZE = 30;
 const EMPTY_STATS: MemoStatsResponse = {
@@ -177,77 +60,123 @@ const EMPTY_STATS: MemoStatsResponse = {
   activity: [],
 };
 
-function FlareMoApp() {
-  const { t, toggleLocale } = useI18n();
-  const queryClient = useQueryClient();
+// Breaks the App ↔ router-tree import cycle: the route tree renders the
+// workspace through this registry instead of importing `@/App`. Module-eval
+// order guarantees registration before the router's first render.
+registerWorkspaceComponent(FlareMoApp);
+
+export function FlareMoApp() {
+  const { locale, t, toggleLocale } = useI18n();
   const navigate = useNavigate({ from: "/" });
   const search = indexRoute.useSearch();
   const view = search.view ?? "all";
   const activeTag = search.tag;
   const untagged = Boolean(search.untagged);
   const query = search.q ?? "";
-  const setView = (nextView: ViewMode) =>
-    void navigate({
-      replace: true,
-      search: (current) => ({ ...current, view: nextView }),
-    });
-  const setActiveTag = (tag: string | undefined) =>
-    void navigate({
-      replace: true,
-      search: (current) => ({ ...current, tag, untagged: undefined }),
-    });
-  const setUntagged = (next: boolean) =>
-    void navigate({
-      replace: true,
-      search: (current) => ({
-        ...current,
-        tag: undefined,
-        untagged: next ? true : undefined,
-      }),
-    });
-  const setQuery = (q: string) =>
-    void navigate({
-      replace: true,
-      search: (current) => ({
-        ...current,
-        q: q || undefined,
-        // A text query includes timeline and archived notes by default; trash
-        // remains available through the explicit `in:trash` search operator.
-        view: q.trim() ? "all" : view,
-      }),
-    });
-  const [sharesByMemo, setSharesByMemo] = useState<Map<string, Share>>(
-    new Map(),
+  const composeRequested = Boolean(search.compose);
+  // A query that is exactly one local day is not a text search; it renders as
+  // a removable date chip and the search box stays empty.
+  const dayFilter = dayFilterFromQuery(query);
+  const setView = useCallback(
+    (nextView: ViewMode) => {
+      void navigate({
+        replace: true,
+        search: (current) => ({ ...current, view: nextView }),
+      });
+    },
+    [navigate],
   );
+  const setActiveTag = useCallback(
+    (tag: string | undefined) => {
+      void navigate({
+        replace: true,
+        search: (current) => ({ ...current, tag, untagged: undefined }),
+      });
+    },
+    [navigate],
+  );
+  const setUntagged = useCallback(
+    (next: boolean) => {
+      void navigate({
+        replace: true,
+        search: (current) => ({
+          ...current,
+          tag: undefined,
+          untagged: next || undefined,
+        }),
+      });
+    },
+    [navigate],
+  );
+  const setQuery = useCallback(
+    (q: string) => {
+      void navigate({
+        replace: true,
+        search: (current) => ({
+          ...current,
+          q: q || undefined,
+          view: q.trim() ? "all" : "view" in current ? current.view : undefined,
+        }),
+      });
+    },
+    [navigate],
+  );
+  const clearFilters = useCallback(() => {
+    void navigate({
+      replace: true,
+      search: (current) => ({
+        ...current,
+        q: undefined,
+        tag: undefined,
+        untagged: undefined,
+      }),
+    });
+  }, [navigate]);
   const [timeZone] = useState(
     () => Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
   );
-  const [newMemoDraftId] = useState(getNewMemoDraftId);
-  const capture = useNewMemoCapture({ draftId: newMemoDraftId });
   const desktopSearchRef = useRef<HTMLInputElement>(null);
   const mobileSearchRef = useRef<HTMLInputElement>(null);
   const [isTimelineScrolled, setIsTimelineScrolled] = useState(false);
-  const isQueueFlushing = useRef(false);
-  const isQueueFlushPending = useRef(false);
-  const isCaptureSubmitting = useRef(false);
-  const restoredDraftNotified = useRef(false);
-  const [isCaptureSubmissionPending, setIsCaptureSubmissionPending] =
-    useState(false);
-  const debouncedQuery = useDebouncedValue(query.trim(), 250);
-  const isSearching = Boolean(debouncedQuery);
+  const [mobileSheetOpen, setMobileSheetOpen] = useState(false);
+  const [shortcutsOpen, setShowShortcutsOpen] = useState(false);
+  const searchQuery = query.trim();
+  const isSearching = Boolean(searchQuery);
   const [semanticMode, setSemanticMode] = useState(false);
 
+  const vectorUsageQuery = useQuery({
+    queryKey: ["vector-usage"],
+    queryFn: () => getVectorUsage(),
+    staleTime: 5 * 60 * 1000,
+    retry: false,
+  });
+  // Semantic search is hidden when the plan has no budget for it (quota 0)
+  // or the capability itself is disabled server-side.
+  const semanticEnabled = useMemo(() => {
+    const plan = vectorUsageQuery.data?.plan;
+    if (!plan) return false;
+    const limit =
+      plan.user?.limits.semanticSearchQueriesPerMonth ??
+      plan.limits.semanticSearchQueriesPerMonth;
+    return typeof limit === "number" && limit > 0;
+  }, [vectorUsageQuery.data]);
+
+  const isSemanticSearch =
+    semanticMode && semanticEnabled && isSearching && !dayFilter;
+  const toggleSemantic = useCallback(
+    () => setSemanticMode((value) => !value),
+    [],
+  );
   const semanticResultsQuery = useQuery({
-    queryKey: ["semantic-search", debouncedQuery],
-    enabled: semanticMode && Boolean(debouncedQuery),
-    queryFn: () => semanticSearchMemos(debouncedQuery, 20),
+    queryKey: ["semantic-search", searchQuery],
+    enabled: isSemanticSearch,
+    queryFn: ({ signal }) => semanticSearchMemos(searchQuery, 20, signal),
     retry: false,
   });
   const semanticMemos = useMemo(
     () => semanticResultsQuery.data?.memos ?? [],
     [semanticResultsQuery.data],
   );
-  const semanticDegraded = semanticResultsQuery.data?.degraded ?? false;
 
   useEffect(() => {
     const focusSearch = () => {
@@ -273,13 +202,18 @@ function FlareMoApp() {
         focusSearch();
         return;
       }
-      // "c" jumps straight into the composer, like Memos' quick capture.
+      // "c" jumps straight into the composer for quick capture.
       if (event.key.toLocaleLowerCase() === "c" && !editable) {
         const composer = document.getElementById("flaremo-composer-input");
         if (composer instanceof HTMLTextAreaElement) {
           event.preventDefault();
           composer.focus();
         }
+      }
+      // "?" lists the available keyboard shortcuts.
+      if (event.key === "?" && !editable) {
+        event.preventDefault();
+        setShowShortcutsOpen(true);
       }
     };
 
@@ -288,18 +222,22 @@ function FlareMoApp() {
   }, []);
 
   const memosQuery = useInfiniteQuery({
-    queryKey: ["memos", view, debouncedQuery, activeTag, untagged],
+    queryKey: ["memos", view, searchQuery, activeTag, untagged],
     initialPageParam: undefined as string | undefined,
-    queryFn: ({ pageParam }) =>
-      listMemos({
-        include_deleted: !isSearching && view === "trashed",
-        page_size: PAGE_SIZE,
-        page_token: pageParam,
-        q: debouncedQuery || undefined,
-        state: isSearching ? undefined : viewToMemoState(view),
-        tag: activeTag,
-        untagged,
-      }),
+    enabled: !isSemanticSearch,
+    queryFn: ({ pageParam, signal }) =>
+      listMemos(
+        {
+          include_deleted: !isSearching && view === "trashed",
+          page_size: PAGE_SIZE,
+          page_token: pageParam,
+          q: searchQuery || undefined,
+          state: isSearching ? undefined : viewToMemoState(view),
+          tag: activeTag,
+          untagged,
+        },
+        signal,
+      ),
     getNextPageParam: (lastPage) => lastPage.next_page_token,
     retry: false,
   });
@@ -318,298 +256,94 @@ function FlareMoApp() {
     () => memosQuery.data?.pages.flatMap((page) => page.memos) ?? [],
     [memosQuery.data],
   );
+  const displayedMemos = isSemanticSearch ? semanticMemos : memos;
   const attachmentsByMemo = useMemo(
     () =>
       new Map(
-        memos.map((memo) => [memo.name, memo.attachments ?? []] as const),
+        displayedMemos.map(
+          (memo) => [memo.name, memo.attachments ?? []] as const,
+        ),
       ),
-    [memos],
+    [displayedMemos],
   );
   const stats = statsQuery.data ?? EMPTY_STATS;
 
-  const invalidateWorkspace = () =>
-    Promise.all([
-      queryClient.invalidateQueries({ queryKey: ["memos"] }),
-      queryClient.invalidateQueries({ queryKey: ["memo-stats"] }),
-      queryClient.invalidateQueries({ queryKey: ["tag-hierarchy"] }),
-    ]);
-  const handleMutationError = (error: unknown) => {
-    const normalizedError = toError(error);
-    if (
-      normalizedError instanceof ApiError &&
-      (normalizedError.status === 401 || normalizedError.status === 403)
-    ) {
-      toast.error(t("toast.accessRequired"));
-      return;
-    }
-    toast.error(normalizedError.message);
-  };
+  const {
+    deleteTagMutation,
+    handleMutationError,
+    hardDeleteMutation,
+    invalidateWorkspace,
+    renameTagMutation,
+    restoreMutation,
+    sharesByMemo,
+    shareMutation,
+    trashMutation,
+    updateMutation,
+  } = useMemoMutations();
 
-  const { mutateAsync: createMemoAsync, isPending: isCreatingMemo } =
-    useMutation({
-      mutationFn: createMemoWithAttachments,
-      onSuccess: () => {
-        void invalidateWorkspace();
-      },
-      // A memo can be created before one of its attachment uploads loses the
-      // network response. Refresh the list even on failure so the durable
-      // memo is not hidden while its queued attachment retry is pending.
-      onError: () => {
-        void invalidateWorkspace();
-      },
-    });
-
-  const trashMutation = useMutation({
-    mutationFn: trashMemo,
-    onMutate: (id) =>
-      optimisticallyPatchMemo(queryClient, id, { state: "trashed" }),
-    onSuccess: () => {
-      toast.success(t("toast.movedToTrash"));
-    },
-    onError: (error, _id, snapshot) => {
-      restoreMemoSnapshot(queryClient, snapshot);
-      handleMutationError(error);
-    },
-    onSettled: () => void invalidateWorkspace(),
+  const { handleExport, handleImportFile } = useDataTransfer({
+    handleMutationError,
+    invalidateWorkspace,
   });
 
-  const renameTagMutation = useMutation({
-    mutationFn: renameTag,
-    onError: (error) => {
-      handleMutationError(error);
-      toast.error(t("explorer.tagRenameFailed"));
+  const { mutate: updateMemo, mutateAsync: updateMemoAsync } = updateMutation;
+  const { mutate: trashMemo } = trashMutation;
+  const { mutate: restoreMemo } = restoreMutation;
+  const { mutate: shareMemo } = shareMutation;
+  const { mutateAsync: hardDeleteMemo } = hardDeleteMutation;
+  const handleArchive = useCallback(
+    (id: string) => {
+      const source = displayedMemos.find(
+        (item) => item.name === id || item.id === id,
+      );
+      updateMemo({
+        id,
+        input: { status: source?.state === "archived" ? "normal" : "archived" },
+      });
     },
-    onSettled: () => void invalidateWorkspace(),
-  });
-
-  const deleteTagMutation = useMutation({
-    mutationFn: deleteTag,
-    onError: (error) => {
-      handleMutationError(error);
-      toast.error(t("explorer.tagDeleteFailed"));
+    [displayedMemos, updateMemo],
+  );
+  const handlePin = useCallback(
+    (id: string, pinned: boolean) => updateMemo({ id, input: { pinned } }),
+    [updateMemo],
+  );
+  const handleUpdate = useCallback(
+    async (
+      id: string,
+      input: { content: string; visibility: MemoVisibility },
+    ) => {
+      await updateMemoAsync({ id, input });
     },
-    onSuccess: () => toast.success(t("explorer.tagDeleted")),
-    onSettled: () => void invalidateWorkspace(),
-  });
-
-  const restoreMutation = useMutation({
-    mutationFn: (id: string) => updateMemo(id, { status: "normal" }),
-    onMutate: (id) =>
-      optimisticallyPatchMemo(queryClient, id, { state: "normal" }),
-    onSuccess: () => {
-      toast.success(t("toast.restored"));
+    [updateMemoAsync],
+  );
+  const handleHardDelete = useCallback(
+    async (id: string) => {
+      await hardDeleteMemo(id);
     },
-    onError: (error, _id, snapshot) => {
-      restoreMemoSnapshot(queryClient, snapshot);
-      handleMutationError(error);
-    },
-    onSettled: () => void invalidateWorkspace(),
-  });
+    [hardDeleteMemo],
+  );
+  const { fetchNextPage, refetch, isFetchNextPageError } = memosQuery;
+  const { refetch: refetchSemantic } = semanticResultsQuery;
+  const handleLoadMore = useCallback(() => {
+    void fetchNextPage();
+  }, [fetchNextPage]);
+  const handleRetry = useCallback(() => {
+    if (isSemanticSearch) void refetchSemantic();
+    else if (isFetchNextPageError) void fetchNextPage();
+    else void refetch();
+  }, [
+    isSemanticSearch,
+    isFetchNextPageError,
+    fetchNextPage,
+    refetch,
+    refetchSemantic,
+  ]);
+  const isUpdating = isSemanticSearch
+    ? semanticResultsQuery.isFetching
+    : memosQuery.isFetching && !memosQuery.isFetchingNextPage;
+  const hasFilters = Boolean(query.trim() || activeTag || untagged);
 
-  const updateMutation = useMutation({
-    mutationFn: ({
-      id,
-      input,
-    }: {
-      id: string;
-      input: Parameters<typeof updateMemo>[1];
-    }) => updateMemo(id, input),
-    onMutate: ({ id, input }) =>
-      optimisticallyPatchMemo(queryClient, id, memoPatchFromUpdate(input)),
-    onSuccess: () => {
-      toast.success(t("toast.updated"));
-    },
-    onError: (error, _variables, snapshot) => {
-      restoreMemoSnapshot(queryClient, snapshot);
-      handleMutationError(error);
-    },
-    onSettled: () => void invalidateWorkspace(),
-  });
-
-  const hardDeleteMutation = useMutation({
-    mutationFn: hardDeleteMemo,
-    onMutate: (id) => optimisticallyPatchMemo(queryClient, id, null),
-    onSuccess: () => {
-      toast.success(t("toast.deleted"));
-    },
-    onError: (error, _id, snapshot) => {
-      restoreMemoSnapshot(queryClient, snapshot);
-      handleMutationError(error);
-    },
-    onSettled: () => void invalidateWorkspace(),
-  });
-
-  const shareMutation = useMutation({
-    mutationFn: createShare,
-    onSuccess: (share) => {
-      setSharesByMemo((current) => new Map(current).set(share.memo, share));
-      toast.success(t("toast.shareCreated"));
-    },
-    onError: handleMutationError,
-  });
-
-  const flushQueuedCaptures = useCallback(async () => {
-    if (!isBrowserOnline()) return;
-    // An "online" event that lands while a flush is running (e.g. the mount
-    // flush) must schedule another pass instead of being swallowed.
-    if (isQueueFlushing.current) {
-      isQueueFlushPending.current = true;
-      return;
-    }
-
-    isQueueFlushing.current = true;
-    try {
-      let submitted = 0;
-      let failed = 0;
-      do {
-        isQueueFlushPending.current = false;
-        const result = await flushQueuedMemoSubmissions(
-          (submission) => createMemoAsync(submission),
-          {
-            shouldContinueAfterFailure:
-              shouldContinueQueuedSubmissionAfterFailure,
-          },
-        );
-        submitted += result.submittedIds.length;
-        failed += result.failedIds.length;
-      } while (isQueueFlushPending.current && isBrowserOnline());
-      if (submitted > 0) {
-        toast.success(t("toast.queueSynced"));
-      }
-      if (failed > 0) {
-        toast.error(t("toast.queueNeedsAttention", { count: failed }));
-      }
-    } finally {
-      isQueueFlushing.current = false;
-    }
-  }, [createMemoAsync, t]);
-
-  useEffect(() => {
-    void flushQueuedCaptures();
-    const handleOnline = () => void flushQueuedCaptures();
-    window.addEventListener("online", handleOnline);
-    return () => window.removeEventListener("online", handleOnline);
-  }, [flushQueuedCaptures]);
-
-  useEffect(() => {
-    if (!capture.didRestoreStoredDraft || restoredDraftNotified.current) return;
-    restoredDraftNotified.current = true;
-    toast.success(t("toast.draftRestored"));
-  }, [capture.didRestoreStoredDraft, t]);
-
-  const handleCaptureSubmit = async (input: MemoCaptureInput) => {
-    if (isCaptureSubmitting.current) return;
-
-    isCaptureSubmitting.current = true;
-    setIsCaptureSubmissionPending(true);
-    const submission = {
-      ...input,
-      content: input.content || t("toast.untitledAttachment"),
-    };
-    try {
-      const validationError = validateMemoCaptureSubmission(submission, t);
-      if (validationError) {
-        handleMutationError(validationError);
-        throw validationError;
-      }
-
-      if (!isBrowserOnline()) {
-        const queued = await enqueueMemoSubmission(submission);
-        if (!queued) {
-          const error = new Error(t("toast.offlineStorageUnavailable"));
-          handleMutationError(error);
-          throw error;
-        }
-        await capture.discardDraft();
-        toast.success(t("toast.queuedForSync"));
-        return;
-      }
-
-      try {
-        await createMemoAsync(submission);
-        await capture.discardDraft();
-        toast.success(t("toast.saved"));
-      } catch (error) {
-        if (!shouldQueueAfterFailure(error)) {
-          handleMutationError(error);
-          throw error;
-        }
-
-        const queued = await enqueueMemoSubmission(submission);
-        if (!queued) {
-          handleMutationError(error);
-          throw error;
-        }
-        await capture.discardDraft();
-        toast.success(t("toast.queuedForSync"));
-      }
-    } finally {
-      isCaptureSubmitting.current = false;
-      setIsCaptureSubmissionPending(false);
-    }
-  };
-
-  const handleExport = async () => {
-    try {
-      const { task } = await createExportTask();
-      toast.success(t("toast.exportStarted"));
-      const finished = await pollDataTask(task.id);
-      if (finished.status !== "succeeded") {
-        toast.error(
-          t("toast.exportFailed", {
-            message: finished.error_message ?? finished.status,
-          }),
-        );
-        return;
-      }
-      const blob = await downloadExportJson(finished.id);
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = `flaremo-export-${new Date().toISOString()}.json`;
-      anchor.click();
-      URL.revokeObjectURL(url);
-      toast.success(t("toast.exportDone"));
-    } catch (error) {
-      handleMutationError(error);
-    }
-  };
-
-  const handleImportFile = async (bundle: unknown) => {
-    try {
-      const { task, result } = await createImportTask({ bundle });
-      toast.success(t("toast.importStarted"));
-      if (task.status !== "succeeded") {
-        toast.error(
-          t("toast.importFailed", {
-            message: task.error_message ?? task.status,
-          }),
-        );
-        return;
-      }
-      toast.success(t("toast.importDone", { count: result.imported_memos }));
-      void invalidateWorkspace();
-    } catch (error) {
-      handleMutationError(error);
-    }
-  };
-
-  const pollDataTask = async (id: string) => {
-    for (;;) {
-      const { task } = await getDataTask(id);
-      if (
-        task.status === "succeeded" ||
-        task.status === "failed" ||
-        task.status === "expired"
-      ) {
-        return task;
-      }
-      toast(t("toast.taskPending"), { id: "data-task-pending" });
-      await new Promise((resolve) => setTimeout(resolve, 1500));
-    }
-  };
-
-  const renderExplorer = (importInputId: string) => (
+  const renderExplorer = (importInputId: string, onNavigate?: () => void) => (
     <FlareMoExplorer
       activeTag={activeTag}
       activeView={view}
@@ -623,7 +357,11 @@ function FlareMoApp() {
             size="icon-sm"
             variant="ghost"
           >
-            <Link title={t("auth.accountTitle")} to="/account">
+            <Link
+              onClick={onNavigate}
+              title={t("auth.accountTitle")}
+              to="/account"
+            >
               <SettingsIcon />
             </Link>
           </Button>
@@ -687,6 +425,7 @@ function FlareMoApp() {
       onTagChange={setActiveTag}
       onUntaggedChange={setUntagged}
       onViewChange={setView}
+      onNavigate={onNavigate}
     />
   );
 
@@ -706,7 +445,7 @@ function FlareMoApp() {
             )}
           >
             <div className="flex h-14 items-center gap-2 px-5 lg:px-3">
-              <Sheet>
+              <Sheet open={mobileSheetOpen} onOpenChange={setMobileSheetOpen}>
                 <SheetTrigger asChild>
                   <Button
                     aria-label={t("sidebar.toggle")}
@@ -728,7 +467,9 @@ function FlareMoApp() {
                     className="no-scrollbar h-full overflow-y-auto overscroll-contain"
                     data-testid="mobile-sidebar-scroll"
                   >
-                    {renderExplorer("flaremo-import-file-mobile")}
+                    {renderExplorer("flaremo-import-file-mobile", () =>
+                      setMobileSheetOpen(false),
+                    )}
                   </div>
                 </SheetContent>
               </Sheet>
@@ -737,350 +478,202 @@ function FlareMoApp() {
                   /
                 </span>
                 <div className="truncate px-1.5 py-1 text-sm font-semibold">
-                  {query.trim() ? t("search.results") : viewTitle(view, t)}
+                  {dayFilter
+                    ? formatDayTitle(dayFilter, locale)
+                    : query.trim()
+                      ? t("search.results")
+                      : viewTitle(view, t)}
                 </div>
-                {activeTag && (
-                  <button
-                    className="truncate rounded-md px-1.5 py-1 text-sm text-muted-foreground motion-safe:transition-colors hover:bg-muted"
-                    type="button"
-                    onClick={() => setActiveTag(undefined)}
-                  >
-                    #{activeTag}
-                  </button>
-                )}
               </div>
-              <SearchBox
-                className="hidden w-[243px] md:block"
+              <WorkspaceSearch
+                className="hidden w-[280px] min-w-0 shrink md:block"
                 inputRef={desktopSearchRef}
-                onToggleSemantic={() => setSemanticMode((value) => !value)}
-                query={query}
+                onToggleSemantic={semanticEnabled ? toggleSemantic : undefined}
+                query={dayFilter ? "" : query}
                 semanticMode={semanticMode}
-                showShortcut
-                setQuery={setQuery}
-                t={t}
+                onQueryChange={setQuery}
+                isPending={isUpdating}
               />
             </div>
           </header>
           <main
             className="mx-auto min-h-0 w-full max-w-[640px] flex-1 overflow-y-auto px-5 pt-1 pb-8 lg:px-3"
-            onScroll={(event) =>
-              setIsTimelineScrolled(event.currentTarget.scrollTop > 4)
-            }
+            onScroll={(event) => {
+              const scrolled = event.currentTarget.scrollTop > 4;
+              setIsTimelineScrolled((prev) =>
+                prev === scrolled ? prev : scrolled,
+              );
+            }}
           >
-            <SearchBox
+            <WorkspaceSearch
               className="mb-3 md:hidden motion-safe:animate-rise"
               inputRef={mobileSearchRef}
-              onToggleSemantic={() => setSemanticMode((value) => !value)}
-              query={query}
+              onToggleSemantic={semanticEnabled ? toggleSemantic : undefined}
+              query={dayFilter ? "" : query}
               semanticMode={semanticMode}
-              setQuery={setQuery}
-              t={t}
+              onQueryChange={setQuery}
+              isPending={isUpdating}
             />
             <div className="flex flex-col gap-3">
-              {view === "all" && (
-                <MemoComposer
-                  draft={capture.draft}
-                  isPending={isCreatingMemo || isCaptureSubmissionPending}
-                  onDraftChange={capture.updateDraft}
-                  onSubmit={handleCaptureSubmit}
-                />
-              )}
-              {(activeTag || query.trim()) && (
+              <WorkspaceComposer
+                visible={view === "all"}
+                composeRequested={composeRequested}
+              />
+              {hasFilters && (
                 <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground motion-safe:animate-rise">
-                  {query.trim() && (
-                    <span className="rounded-md bg-muted px-2 py-1">
+                  {query.trim() && !dayFilter && !isSemanticSearch && (
+                    <span className="flex items-center gap-1.5 rounded-md bg-muted px-2 py-1">
                       {t("search.globalScope")}
+                      <InfoTip text={t("search.syntaxHint")} />
+                    </span>
+                  )}
+                  {dayFilter && (
+                    <span className="flex items-center gap-1 rounded-md bg-muted px-2 py-1">
+                      <CalendarIcon
+                        aria-hidden="true"
+                        className="size-3 shrink-0"
+                      />
+                      {formatDayTitle(dayFilter, locale)}
+                      <button
+                        aria-label={t("filter.clearDate")}
+                        className="-mr-1 rounded p-0.5 hover:text-foreground"
+                        type="button"
+                        onClick={() => setQuery("")}
+                      >
+                        <XIcon className="size-3.5" />
+                      </button>
                     </span>
                   )}
                   {activeTag && (
                     <button
-                      className="rounded-md bg-muted px-2 py-1 motion-safe:transition-colors hover:text-foreground"
+                      aria-label={t("filter.clearTag", { tag: activeTag })}
+                      className="flex min-h-8 items-center gap-1 rounded-md bg-muted px-2 py-1 motion-safe:transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
                       type="button"
                       onClick={() => setActiveTag(undefined)}
                     >
                       #{activeTag}
+                      <XIcon aria-hidden="true" className="size-3.5" />
                     </button>
                   )}
-                  <button
-                    className="rounded-md px-2 py-1 motion-safe:transition-colors hover:bg-muted hover:text-foreground"
-                    type="button"
-                    onClick={() => {
-                      setActiveTag(undefined);
-                      setQuery("");
-                    }}
-                  >
-                    {t("common.clearFilters")}
-                  </button>
+                  {untagged && (
+                    <button
+                      className="flex min-h-8 items-center gap-1 rounded-md bg-muted px-2 py-1 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+                      aria-label={t("filter.clearUntagged")}
+                      type="button"
+                      onClick={() => setUntagged(false)}
+                    >
+                      {t("explorer.untagged")}
+                      <XIcon aria-hidden="true" className="size-3.5" />
+                    </button>
+                  )}
+                  {hasFilters && (
+                    <button
+                      className="rounded-md px-2 py-1 motion-safe:transition-colors hover:bg-muted hover:text-foreground"
+                      type="button"
+                      onClick={clearFilters}
+                    >
+                      {t("common.clearFilters")}
+                    </button>
+                  )}
                 </div>
-              )}
-              {query.trim() && !semanticMode && (
-                <p className="-mt-1 text-xs text-muted-foreground">
-                  {t("search.syntaxHint")}
-                </p>
-              )}
-              {semanticMode && query.trim() && !semanticDegraded && (
-                <p className="-mt-1 text-xs text-muted-foreground">
-                  {t("search.semanticEmpty")}
-                </p>
               )}
               <MemoList
                 attachmentsByMemo={attachmentsByMemo}
+                emptyDescription={
+                  isSemanticSearch
+                    ? t("search.semanticEmpty")
+                    : hasFilters
+                      ? t("list.filteredEmptyDescription")
+                      : view === "archived"
+                        ? t("list.archiveEmptyDescription")
+                        : view === "trashed"
+                          ? t("list.trashEmptyDescription")
+                          : undefined
+                }
                 hasError={
-                  semanticMode
+                  isSemanticSearch
                     ? semanticResultsQuery.isError
                     : memosQuery.isError
                 }
                 hasNextPage={
-                  semanticMode ? false : Boolean(memosQuery.hasNextPage)
+                  isSemanticSearch ? false : Boolean(memosQuery.hasNextPage)
                 }
                 isFetchingNextPage={
-                  semanticMode ? false : memosQuery.isFetchingNextPage
+                  isSemanticSearch ? false : memosQuery.isFetchingNextPage
                 }
                 isLoading={
-                  semanticMode
+                  isSemanticSearch
                     ? semanticResultsQuery.isLoading
                     : memosQuery.isLoading
                 }
-                memos={semanticMode ? semanticMemos : memos}
-                searchQuery={debouncedQuery || undefined}
+                memos={displayedMemos}
+                searchQuery={searchQuery || undefined}
                 sharesByMemo={sharesByMemo}
-                onArchive={(id) => {
-                  const source = semanticMode ? semanticMemos : memos;
-                  const memo = source.find(
-                    (item) => item.name === id || item.id === id,
-                  );
-                  updateMutation.mutate({
-                    id,
-                    input: {
-                      status:
-                        memo?.state === "archived" ? "normal" : "archived",
-                    },
-                  });
-                }}
-                onHardDelete={async (id) => {
-                  await hardDeleteMutation.mutateAsync(id);
-                }}
-                onLoadMore={() => {
-                  if (!semanticMode) void memosQuery.fetchNextPage();
-                }}
-                onPin={(id, pinned) =>
-                  updateMutation.mutate({ id, input: { pinned } })
-                }
-                onRestore={(id) => restoreMutation.mutate(id)}
-                onRetry={() => {
-                  if (semanticMode) void semanticResultsQuery.refetch();
-                  else void memosQuery.refetch();
-                }}
-                onShare={(id) => shareMutation.mutate(id)}
+                onArchive={handleArchive}
+                onHardDelete={handleHardDelete}
+                onLoadMore={handleLoadMore}
+                onPin={handlePin}
+                onRestore={restoreMemo}
+                onRetry={handleRetry}
+                onShare={shareMemo}
                 onTagClick={setActiveTag}
-                onTrash={(id) => trashMutation.mutate(id)}
-                onUpdate={async (id, input) => {
-                  await updateMutation.mutateAsync({ id, input });
-                }}
+                onTrash={trashMemo}
+                onUpdate={handleUpdate}
+                onClearFilters={hasFilters ? clearFilters : undefined}
+                isUpdating={isUpdating}
+                isPaginationError={!isSemanticSearch && isFetchNextPageError}
+                isRetrying={
+                  isSemanticSearch
+                    ? semanticResultsQuery.isFetching
+                    : memosQuery.isFetching
+                }
+                emptyTitle={
+                  hasFilters
+                    ? t("list.filteredEmptyTitle")
+                    : view === "all"
+                      ? t("list.emptyTitle")
+                      : view === "archived"
+                        ? t("list.archiveEmptyTitle")
+                        : t("list.trashEmptyTitle")
+                }
               />
             </div>
           </main>
         </div>
       </div>
+      <Dialog open={shortcutsOpen} onOpenChange={setShowShortcutsOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>{t("shortcuts.title")}</DialogTitle>
+            <DialogDescription>{t("shortcuts.subtitle")}</DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-col divide-y divide-border/60">
+            {(
+              [
+                ["shortcuts.search", "⌘K / /"],
+                ["shortcuts.composer", "C"],
+                ["shortcuts.send", "Enter"],
+                ["shortcuts.linebreak", "Shift + Enter"],
+                ["shortcuts.saveEdit", "⌘Enter"],
+              ] as const
+            ).map(([key, combo]) => (
+              <div
+                className="flex items-center justify-between gap-3 py-2 text-sm"
+                key={key}
+              >
+                <span className="text-muted-foreground">
+                  {t(key as TranslationKey)}
+                </span>
+                <kbd className="rounded-md border bg-muted px-2 py-0.5 font-mono text-xs">
+                  {combo}
+                </kbd>
+              </div>
+            ))}
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
-}
-
-function SearchBox({
-  className,
-  inputRef,
-  query,
-  showShortcut = false,
-  semanticMode = false,
-  onToggleSemantic,
-  setQuery,
-  t,
-}: {
-  className: string;
-  inputRef?: RefObject<HTMLInputElement | null>;
-  query: string;
-  showShortcut?: boolean;
-  semanticMode?: boolean;
-  onToggleSemantic?: () => void;
-  setQuery: (value: string) => void;
-  t: (key: TranslationKey) => string;
-}) {
-  return (
-    <div className={className}>
-      <div className="relative">
-        <SearchIcon className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-muted-foreground" />
-        <Input
-          aria-label={t("common.search")}
-          className="h-9 rounded-xl border-0 bg-muted pr-11 pl-9 shadow-none transition-[box-shadow,background-color] focus-visible:bg-card focus-visible:ring-2 focus-visible:ring-flame-400/30"
-          placeholder={
-            semanticMode
-              ? t("search.semanticPlaceholder")
-              : t("search.placeholder")
-          }
-          ref={inputRef}
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-        />
-        {onToggleSemantic && (
-          <button
-            aria-label={t("search.semanticToggle")}
-            aria-pressed={semanticMode}
-            className={cn(
-              "absolute top-1/2 right-2 -translate-y-1/2 rounded-md p-1 transition-colors",
-              semanticMode
-                ? "bg-flame-500/15 text-flame-500"
-                : "text-muted-foreground hover:text-foreground",
-            )}
-            title={t("search.semanticToggle")}
-            type="button"
-            onClick={onToggleSemantic}
-          >
-            <SparklesIcon className="size-4" />
-          </button>
-        )}
-        {showShortcut && !onToggleSemantic && (
-          <kbd className="pointer-events-none absolute top-1/2 right-2 -translate-y-1/2 rounded-md border bg-card px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground shadow-xs">
-            ⌘K
-          </kbd>
-        )}
-      </div>
-    </div>
-  );
-}
-
-async function createMemoWithAttachments(input: MemoCaptureInput) {
-  const memo = await createMemo({
-    content: input.content,
-    visibility: input.visibility,
-    payload: { tags: input.tags, client_id: input.clientId },
-    source: "web",
-  });
-
-  // A mobile queue can hold many large files. Upload them in order so a
-  // transient failure stops early, and each retry only replays stable ids.
-  for (const [index, file] of input.files.entries()) {
-    await uploadAttachment({
-      file,
-      memo: memo.name,
-      clientId: getAttachmentCaptureClientId(input.clientId, index),
-    });
-  }
-
-  return memo;
-}
-
-function getAttachmentCaptureClientId(
-  memoClientId: string | undefined,
-  index: number,
-) {
-  if (!memoClientId) return undefined;
-  const clientId = `${memoClientId}:attachment:${index}`;
-  return clientId.length <= 128 ? clientId : undefined;
-}
-
-function toError(error: unknown) {
-  return error instanceof Error ? error : new Error(String(error));
-}
-
-function shouldQueueAfterFailure(error: unknown) {
-  // Queue only when the request never received a meaningful answer (network
-  // failure, timeout, rate limit). A server error response is surfaced to
-  // the user instead, with the draft kept intact for an explicit retry.
-  if (!(error instanceof ApiError)) return true;
-  return error.status === 408 || error.status === 429;
-}
-
-function shouldContinueQueuedSubmissionAfterFailure(error: unknown) {
-  return (
-    error instanceof ApiError &&
-    error.status >= 400 &&
-    error.status < 500 &&
-    error.status !== 408 &&
-    error.status !== 429
-  );
-}
-
-function validateMemoCaptureSubmission(
-  input: MemoCaptureInput,
-  t: (key: TranslationKey) => string,
-) {
-  if (input.content.length > 100_000) {
-    return new Error(t("toast.memoTooLong"));
-  }
-  if (input.files.length > 100) {
-    return new Error(t("toast.tooManyAttachments"));
-  }
-  if (input.files.some((file) => file.size > 25 * 1024 * 1024)) {
-    return new Error(t("toast.attachmentTooLarge"));
-  }
-  return undefined;
-}
-
-type MemoSnapshot = Array<
-  [QueryKey, InfiniteData<ListMemosResponse> | undefined]
->;
-
-async function optimisticallyPatchMemo(
-  queryClient: QueryClient,
-  id: string,
-  patch: Partial<Memo> | null,
-): Promise<MemoSnapshot> {
-  await queryClient.cancelQueries({ queryKey: ["memos"] });
-  const snapshots = queryClient.getQueriesData<InfiniteData<ListMemosResponse>>(
-    {
-      queryKey: ["memos"],
-    },
-  );
-
-  for (const [queryKey, data] of snapshots) {
-    if (!data) continue;
-    const view = queryKey[1] as ViewMode | undefined;
-    queryClient.setQueryData<InfiniteData<ListMemosResponse>>(queryKey, {
-      ...data,
-      pages: data.pages.map((page) => ({
-        ...page,
-        memos: page.memos.flatMap((memo) => {
-          if (memo.id !== id && memo.name !== id) return [memo];
-          if (!patch) return [];
-          const next = {
-            ...memo,
-            ...patch,
-            update_time: new Date().toISOString(),
-          };
-          return view && next.state !== viewToMemoState(view) ? [] : [next];
-        }),
-      })),
-    });
-  }
-
-  return snapshots;
-}
-
-function restoreMemoSnapshot(
-  queryClient: QueryClient,
-  snapshot: MemoSnapshot | undefined,
-) {
-  for (const [queryKey, data] of snapshot ?? []) {
-    queryClient.setQueryData(queryKey, data);
-  }
-}
-
-function memoPatchFromUpdate(
-  input: Parameters<typeof updateMemo>[1],
-): Partial<Memo> {
-  return {
-    ...(input.content !== undefined ? { content: input.content } : {}),
-    ...(input.visibility !== undefined ? { visibility: input.visibility } : {}),
-    ...(input.status !== undefined ? { state: input.status } : {}),
-    ...(input.pinned !== undefined ? { pinned: input.pinned } : {}),
-    ...(input.payload !== undefined ? { payload: input.payload } : {}),
-  };
-}
-
-function viewToMemoState(view: ViewMode): MemoState {
-  if (view === "archived") return "archived";
-  if (view === "trashed") return "trashed";
-  return "normal";
 }
 
 function viewTitle(view: ViewMode, t: (key: TranslationKey) => string) {
@@ -1094,368 +687,11 @@ function viewTitle(view: ViewMode, t: (key: TranslationKey) => string) {
   }
 }
 
-const rootRoute = createRootRoute({
-  component: () => <Outlet />,
-  errorComponent: RouteErrorPage,
-});
-
-const indexRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/",
-  component: ProtectedWorkspaceRoutePage,
-  validateSearch: (search: Record<string, unknown>) => ({
-    view: isViewMode(search.view) ? search.view : undefined,
-    q: typeof search.q === "string" && search.q ? search.q : undefined,
-    tag: typeof search.tag === "string" && search.tag ? search.tag : undefined,
-    untagged:
-      search.untagged === true || search.untagged === "true" ? true : undefined,
-  }),
-});
-
-function PublicShareRoutePage() {
-  const { token } = shareRoute.useParams();
-  return (
-    <Suspense fallback={<RouteLoading />}>
-      <PublicSharePage token={token} />
-    </Suspense>
-  );
-}
-
-const shareRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/share/$token",
-  component: PublicShareRoutePage,
-});
-
-function MemoDetailRoutePage() {
-  const { memoId } = memoRoute.useParams();
-  return (
-    <AuthenticatedRoute>
-      <Suspense fallback={<RouteLoading />}>
-        <MemoDetailPage memoId={memoId} />
-      </Suspense>
-    </AuthenticatedRoute>
-  );
-}
-
-const memoRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/memo/$memoId",
-  component: MemoDetailRoutePage,
-});
-
-function ProtectedWorkspaceRoutePage() {
-  return (
-    <AuthenticatedRoute>
-      <FlareMoApp />
-    </AuthenticatedRoute>
-  );
-}
-
-function LoginRoutePage() {
-  return (
-    <Suspense fallback={<RouteLoading />}>
-      <LoginPage />
-    </Suspense>
-  );
-}
-
-const loginRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/login",
-  component: LoginRoutePage,
-});
-
-function RegisterRoutePage() {
-  return (
-    <Suspense fallback={<RouteLoading />}>
-      <RegisterPage />
-    </Suspense>
-  );
-}
-
-const registerRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/register",
-  component: RegisterRoutePage,
-});
-
-function VerifyEmailRoutePage() {
-  const { token } = verifyEmailRoute.useSearch();
-  if (!token) {
-    return (
-      <Suspense fallback={<RouteLoading />}>
-        <VerifyEmailPage token="" />
-      </Suspense>
-    );
-  }
-  return (
-    <Suspense fallback={<RouteLoading />}>
-      <VerifyEmailPage token={token} />
-    </Suspense>
-  );
-}
-
-const verifyEmailRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/verify-email",
-  component: VerifyEmailRoutePage,
-  validateSearch: (search: Record<string, unknown>) => ({
-    token: typeof search.token === "string" ? search.token : undefined,
-  }),
-});
-
-function ForgotPasswordRoutePage() {
-  return (
-    <Suspense fallback={<RouteLoading />}>
-      <ForgotPasswordPage />
-    </Suspense>
-  );
-}
-
-const forgotPasswordRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/forgot-password",
-  component: ForgotPasswordRoutePage,
-});
-
-function VerifyEmailChangeRoutePage() {
-  const { token } = verifyEmailChangeRoute.useSearch();
-  return (
-    <Suspense fallback={<RouteLoading />}>
-      <VerifyEmailChangePage token={token ?? ""} />
-    </Suspense>
-  );
-}
-
-const verifyEmailChangeRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/verify-email-change",
-  component: VerifyEmailChangeRoutePage,
-  validateSearch: (search: Record<string, unknown>) => ({
-    token: typeof search.token === "string" ? search.token : undefined,
-  }),
-});
-
-function ResetRoutePage() {
-  const { token } = resetRoute.useSearch();
-  return (
-    <Suspense fallback={<RouteLoading />}>
-      <ResetPage token={token} />
-    </Suspense>
-  );
-}
-
-const resetRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/reset",
-  component: ResetRoutePage,
-  validateSearch: (search: Record<string, unknown>) => ({
-    token: typeof search.token === "string" ? search.token : undefined,
-  }),
-});
-
-function RecoverRoutePage() {
-  return (
-    <Suspense fallback={<RouteLoading />}>
-      <RecoverPage />
-    </Suspense>
-  );
-}
-
-const recoverRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/recover",
-  component: RecoverRoutePage,
-});
-
-function SetupRoutePage() {
-  return (
-    <Suspense fallback={<RouteLoading />}>
-      <SetupPage />
-    </Suspense>
-  );
-}
-
-const setupRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/setup",
-  component: SetupRoutePage,
-});
-
-function AccountRoutePage() {
-  return (
-    <AuthenticatedRoute>
-      <Suspense fallback={<RouteLoading />}>
-        <AccountPage />
-      </Suspense>
-    </AuthenticatedRoute>
-  );
-}
-
-const accountRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/account",
-  component: AccountRoutePage,
-});
-
-function DailyReviewRoutePage() {
-  return (
-    <AuthenticatedRoute>
-      <Suspense fallback={<RouteLoading />}>
-        <DailyReviewPage />
-      </Suspense>
-    </AuthenticatedRoute>
-  );
-}
-
-const dailyReviewRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/review/daily",
-  component: DailyReviewRoutePage,
-});
-
-function RandomWalkRoutePage() {
-  return (
-    <AuthenticatedRoute>
-      <Suspense fallback={<RouteLoading />}>
-        <RandomWalkPage />
-      </Suspense>
-    </AuthenticatedRoute>
-  );
-}
-
-const randomWalkRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/review/walk",
-  component: RandomWalkRoutePage,
-});
-
-function MemoryRoutePage() {
-  return (
-    <AuthenticatedRoute>
-      <Suspense fallback={<RouteLoading />}>
-        <MemoryPage />
-      </Suspense>
-    </AuthenticatedRoute>
-  );
-}
-
-const memoryRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/memory",
-  component: MemoryRoutePage,
-});
-
-function ProjectsRoutePage() {
-  return (
-    <AuthenticatedRoute>
-      <Suspense fallback={<RouteLoading />}>
-        <ProjectsPage />
-      </Suspense>
-    </AuthenticatedRoute>
-  );
-}
-
-const projectsRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/projects",
-  component: ProjectsRoutePage,
-});
-
-function AuthenticatedRoute({ children }: { children: ReactNode }) {
-  const queryClient = useQueryClient();
-  const session = authClient.useSession();
-  const [authenticationRequired, setAuthenticationRequired] = useState(false);
-
-  useEffect(() => {
-    const handleAuthenticationRequired = () => {
-      queryClient.clear();
-      setAuthenticationRequired(true);
-    };
-    window.addEventListener(
-      AUTHENTICATION_REQUIRED_EVENT,
-      handleAuthenticationRequired,
-    );
-    return () =>
-      window.removeEventListener(
-        AUTHENTICATION_REQUIRED_EVENT,
-        handleAuthenticationRequired,
-      );
-  }, [queryClient]);
-
-  if (session.isPending) {
-    return <RouteLoading />;
-  }
-  if (authenticationRequired || !session.data?.user) {
-    return <Navigate replace to="/login" />;
-  }
-  return children;
-}
-
-function RouteErrorPage({ error }: { error: Error }) {
-  const { t } = useI18n();
-  const router = useRouter();
-  return (
-    <main className="mx-auto flex min-h-svh w-full max-w-xl flex-col items-center justify-center gap-4 px-5 text-center">
-      <div>
-        <h1 className="text-lg font-semibold">{t("list.errorTitle")}</h1>
-        <p className="mt-1 text-sm text-muted-foreground">{error.message}</p>
-      </div>
-      <Button onClick={() => void router.invalidate()}>
-        {t("common.retry")}
-      </Button>
-    </main>
-  );
-}
-
-function RouteLoading() {
-  const { t } = useI18n();
-  return (
-    <main className="flex min-h-svh items-center justify-center text-sm text-muted-foreground">
-      {t("common.loading")}
-    </main>
-  );
-}
-
-function isViewMode(value: unknown): value is ViewMode {
-  return value === "all" || value === "archived" || value === "trashed";
-}
-
-const router = createRouter({
-  defaultPreload: "intent",
-  routeTree: rootRoute.addChildren([
-    indexRoute,
-    memoRoute,
-    shareRoute,
-    loginRoute,
-    registerRoute,
-    verifyEmailRoute,
-    forgotPasswordRoute,
-    verifyEmailChangeRoute,
-    resetRoute,
-    recoverRoute,
-    setupRoute,
-    accountRoute,
-    dailyReviewRoute,
-    randomWalkRoute,
-    memoryRoute,
-    projectsRoute,
-  ]),
-  scrollRestoration: true,
-});
-
-declare module "@tanstack/react-router" {
-  interface Register {
-    router: typeof router;
-  }
-}
-
 export default function App() {
   return (
-    <TooltipProvider>
-      <RouterProvider router={router} />
-      <Toaster />
-    </TooltipProvider>
+    <>
+      <PwaUpdatePrompt />
+      <AppRoutes />
+    </>
   );
 }

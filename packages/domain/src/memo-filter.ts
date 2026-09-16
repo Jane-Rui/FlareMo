@@ -1,5 +1,7 @@
 import type { AttachmentRow, MemoRow, UserRow } from "@flaremo/db";
+import { memos } from "@flaremo/db";
 import { Environment, type ParseResult } from "@marcbachmann/cel-js";
+import { and, eq, or, type SQL, sql } from "drizzle-orm";
 import { ValidationError } from "./errors";
 
 const MAX_MEMO_FILTER_LENGTH = 4_096;
@@ -19,10 +21,18 @@ type MemoFilterAst = {
  * the domain package so REST, Connect-shaped JSON, and MCP all evaluate the
  * same expression against the same resource context.
  */
-export type CompiledMemoFilter = (
+export type CompiledMemoFilter = ((
   memo: MemoRow,
   user: UserRow | null,
-) => boolean;
+) => boolean) & {
+  sqlPredicate?: SQL;
+  /**
+   * True when the SQL predicate is an exact logical translation of the whole
+   * CEL expression (for comparisons the evaluator and SQL agree on), so SQL
+   * alone decides matches and the JS evaluator may be skipped entirely.
+   */
+  completeInSql: boolean;
+};
 
 export type CompiledAttachmentFilter = (attachment: AttachmentRow) => boolean;
 
@@ -154,7 +164,7 @@ export function compileMemoFilter(
 
   const frozenNow = new Date();
 
-  return (memo, user) => {
+  const evaluate: CompiledMemoFilter = (memo, user) => {
     const context = memoFilterContext(memo, user, frozenNow);
     try {
       return compiled(context) === true;
@@ -164,6 +174,73 @@ export function compileMemoFilter(
       );
     }
   };
+  evaluate.sqlPredicate = memoFilterSqlPredicate(compiled.ast);
+  evaluate.completeInSql = memoFilterSqlIsComplete(compiled.ast);
+  return evaluate;
+}
+
+/**
+ * Exact translation; identical comparison semantics in SQL and the CEL
+ * evaluator (state/visibility compare upper-cased on both sides, pinned is a
+ * boolean on both sides), verified in memoFilterContext and
+ * memoFilterSqlPredicate.
+ */
+function memoFilterSqlIsComplete(value: unknown): boolean {
+  if (!isAstNode(value)) return false;
+  if (value.op === "&&") {
+    return (binaryAstArgs(value) ?? []).every((side) =>
+      memoFilterSqlIsComplete(side),
+    );
+  }
+  if (value.op === "||") {
+    const operands = binaryAstArgs(value) ?? [];
+    return (
+      operands.length === 2 &&
+      operands.every(
+        (side) =>
+          memoFilterSqlIsComplete(side) &&
+          memoFilterSqlPredicate(side) !== undefined,
+      )
+    );
+  }
+  return value.op === "==" && memoFilterSqlPredicate(value) !== undefined;
+}
+
+/** Only push down necessary conditions; the CEL evaluator remains authoritative. */
+function memoFilterSqlPredicate(value: unknown): SQL | undefined {
+  if (!isAstNode(value)) return undefined;
+  if (value.op === "&&" || value.op === "||") {
+    const operands = binaryAstArgs(value);
+    if (!operands) return undefined;
+    const left = memoFilterSqlPredicate(operands[0]);
+    const right = memoFilterSqlPredicate(operands[1]);
+    // A partially translated OR would wrongly exclude valid matches.
+    return value.op === "&&"
+      ? and(left, right)
+      : left && right
+        ? or(left, right)
+        : undefined;
+  }
+  if (value.op === "id" && value.args === "pinned") {
+    return eq(memos.pinned, true);
+  }
+  if (value.op !== "==") return undefined;
+  const operands = binaryAstArgs(value);
+  if (!operands) return undefined;
+  const [field, literal] =
+    operands[0].op === "id" ? operands : [operands[1], operands[0]];
+  if (field.op !== "id" || literal.op !== "value") return undefined;
+  if (field.args === "pinned" && typeof literal.args === "boolean") {
+    return eq(memos.pinned, literal.args);
+  }
+  if (typeof literal.args !== "string") return undefined;
+  if (field.args === "state") {
+    return eq(sql`upper(${memos.status})`, literal.args);
+  }
+  if (field.args === "visibility") {
+    return eq(sql`upper(${memos.visibility})`, literal.args);
+  }
+  return undefined;
 }
 
 /**

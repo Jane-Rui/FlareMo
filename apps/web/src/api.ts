@@ -1,6 +1,7 @@
 import type {
   AppNotificationDto,
   AttachmentDto,
+  CalendarView,
   CreateMemoInput,
   CreateMemoryInput,
   CreateProjectInput,
@@ -8,6 +9,7 @@ import type {
   DailyReviewResponse,
   DataTaskDto,
   DeleteTagResponse,
+  ImportBundle,
   ImportResult,
   ListAppNotificationsResponse,
   ListMemosResponse,
@@ -27,7 +29,6 @@ import type {
   ReviewWalkVia,
   ShareDto,
   TagHierarchyResponse,
-  TaskActivityDto,
   TaskDto,
   TaskPriority,
   TaskStatus,
@@ -66,7 +67,7 @@ export type UpdateMemoryRequest = UpdateMemoryInput;
 
 export type Project = ProjectDto;
 export type Task = TaskDto;
-export type TaskActivity = TaskActivityDto;
+export type Calendar = CalendarView;
 export type CreateProjectRequest = CreateProjectInput;
 export type UpdateProjectRequest = UpdateProjectInput;
 export type CreateTaskRequest = CreateTaskInput;
@@ -83,13 +84,9 @@ export type ListMemoParams = {
   page_token?: string;
 };
 
-export type ListAttachmentsResponse = {
-  attachments: Attachment[];
-};
-
 export type AppInfo = {
   ok: true;
-  product: "FlareMo";
+  product: string;
   version: string;
   update_repository: string | null;
   update_workflow_url: string | null;
@@ -140,14 +137,11 @@ export type RegistrationStatus = {
 
 export type CurrentFlareMoUser = {
   id: string;
-  role: "owner" | "member";
+  role: "owner" | "admin" | "member";
+  status: "active" | "removed";
   name: string;
   email: string;
   username: string;
-};
-
-export type AdminSettings = {
-  registration_open: boolean;
 };
 
 export type AdminUser = {
@@ -155,7 +149,8 @@ export type AdminUser = {
   email: string;
   name: string;
   username: string;
-  role: "owner" | "member";
+  role: "owner" | "admin" | "member";
+  status: "active" | "removed";
   created_at: string;
 };
 
@@ -169,7 +164,10 @@ export class ApiError extends Error {
   }
 }
 
-export async function listMemos(params: ListMemoParams = {}) {
+export async function listMemos(
+  params: ListMemoParams = {},
+  signal?: AbortSignal,
+) {
   const query = new URLSearchParams();
   query.set("page_size", String(params.page_size ?? 30));
   query.set("order_by", "created_at desc");
@@ -180,15 +178,22 @@ export async function listMemos(params: ListMemoParams = {}) {
   if (params.include_deleted) query.set("include_deleted", "true");
   if (params.page_token) query.set("page_token", params.page_token);
 
-  return apiRequest<ListMemosResponse>(`/api/app/memos?${query.toString()}`);
+  return apiRequest<ListMemosResponse>(`/api/app/memos?${query.toString()}`, {
+    signal,
+  });
 }
 
-export async function semanticSearchMemos(query: string, limit = 10) {
+export async function semanticSearchMemos(
+  query: string,
+  limit = 10,
+  signal?: AbortSignal,
+) {
   const params = new URLSearchParams();
   params.set("q", query);
   params.set("limit", String(limit));
   return apiRequest<{ memos: MemoDto[]; degraded: boolean }>(
     `/api/app/search/semantic?${params.toString()}`,
+    { signal },
   );
 }
 
@@ -307,12 +312,6 @@ export async function createMemory(input: CreateMemoryRequest) {
   });
 }
 
-export async function getMemory(id: string) {
-  return apiRequest<{ memory: Memory }>(
-    `/api/app/memory/${encodeURIComponent(id)}`,
-  );
-}
-
 export async function updateMemory(id: string, input: UpdateMemoryRequest) {
   return apiRequest<{ memory: Memory }>(
     `/api/app/memory/${encodeURIComponent(id)}`,
@@ -360,12 +359,6 @@ export async function listMemoryRevisions(id: string) {
   );
 }
 
-export async function listMemoryRelations(id: string) {
-  return apiRequest<{ relations: MemoryRelation[] }>(
-    `/api/app/memory/${encodeURIComponent(id)}/relations`,
-  );
-}
-
 // --- Projects ---------------------------------------------------------------
 
 export async function listProjects(
@@ -382,12 +375,6 @@ export async function createProject(input: CreateProjectRequest) {
     method: "POST",
     body: JSON.stringify(input),
   });
-}
-
-export async function getProject(id: string) {
-  return apiRequest<{ project: Project }>(
-    `/api/app/projects/${encodeURIComponent(id)}`,
-  );
 }
 
 export async function updateProject(id: string, input: UpdateProjectRequest) {
@@ -413,7 +400,7 @@ export async function deleteProject(id: string) {
   );
 }
 
-// --- Tasks ------------------------------------------------------------------
+// --- Tasks & calendar ---------------------------------------------------------
 
 export async function listTasks(
   params: { project_id?: string; status?: Task["status"] } = {},
@@ -425,15 +412,24 @@ export async function listTasks(
   return apiRequest<{ tasks: Task[] }>(`/api/app/tasks${suffix}`);
 }
 
+export async function getCalendarView(params: {
+  from: string;
+  to: string;
+  tz?: number;
+}) {
+  const query = new URLSearchParams({
+    from: params.from,
+    to: params.to,
+    tz: String(params.tz ?? 0),
+  });
+  return apiRequest<Calendar>(`/api/app/calendar?${query.toString()}`);
+}
+
 export async function createTask(input: CreateTaskRequest) {
   return apiRequest<{ task: Task }>("/api/app/tasks", {
     method: "POST",
     body: JSON.stringify(input),
   });
-}
-
-export async function getTask(id: string) {
-  return apiRequest<{ task: Task }>(`/api/app/tasks/${encodeURIComponent(id)}`);
 }
 
 export async function updateTask(id: string, input: UpdateTaskRequest) {
@@ -450,19 +446,6 @@ export async function deleteTask(id: string) {
   return apiRequest<{ ok: true }>(`/api/app/tasks/${encodeURIComponent(id)}`, {
     method: "DELETE",
   });
-}
-
-export async function reorderTasks(projectId: string, taskIds: string[]) {
-  return apiRequest<{ tasks: Task[] }>("/api/app/tasks/reorder", {
-    method: "POST",
-    body: JSON.stringify({ project_id: projectId, task_ids: taskIds }),
-  });
-}
-
-export async function listTaskActivity(id: string) {
-  return apiRequest<{ activity: TaskActivity[] }>(
-    `/api/app/tasks/${encodeURIComponent(id)}/activity`,
-  );
 }
 
 export async function createMemoryFromMemo(
@@ -491,9 +474,16 @@ export async function promoteMemoryToMemo(id: string) {
   );
 }
 
-export async function getLatestRelease(): Promise<LatestRelease> {
+// Repository used when the server does not advertise one via
+// /api/app/health (`update_repository`).
+const DEFAULT_RELEASE_REPOSITORY = "realchendahuang/FlareMo";
+
+export async function getLatestRelease(
+  repository: string | null | undefined = DEFAULT_RELEASE_REPOSITORY,
+): Promise<LatestRelease> {
+  const repo = repository || DEFAULT_RELEASE_REPOSITORY;
   const response = await fetch(
-    "https://api.github.com/repos/realchendahuang/FlareMo/releases/latest",
+    `https://api.github.com/repos/${repo}/releases/latest`,
     {
       credentials: "omit",
       headers: {
@@ -524,8 +514,18 @@ export async function getLatestRelease(): Promise<LatestRelease> {
         : `v${version}`,
     published_at:
       typeof release.published_at === "string" ? release.published_at : null,
-    url: `https://github.com/realchendahuang/FlareMo/releases/tag/v${encodeURIComponent(version)}`,
+    url: `https://github.com/${repo}/releases/tag/v${encodeURIComponent(version)}`,
   };
+}
+
+export type CaptureStatus = {
+  available: boolean;
+  provider: string | null;
+  streaming: boolean;
+};
+
+export async function getCaptureStatus() {
+  return apiRequest<CaptureStatus>("/api/app/capture/status");
 }
 
 export async function getBootstrapStatus() {
@@ -619,29 +619,94 @@ export async function getCurrentFlareMoUser() {
   return apiRequest<CurrentFlareMoUser>("/api/app/me");
 }
 
-export async function getAdminSettings() {
-  return apiRequest<AdminSettings>("/api/app/admin/settings");
-}
-
-export async function updateAdminSettings(input: {
-  registration_open: boolean;
-}) {
-  return apiRequest<AdminSettings>("/api/app/admin/settings", {
-    method: "PATCH",
-    body: JSON.stringify(input),
-  });
-}
-
 export async function listAdminUsers() {
   return apiRequest<{ users: AdminUser[] }>("/api/app/admin/users");
 }
 
-export async function createAdminUser(input: {
-  name: string;
-  email: string;
-  password: string;
-}) {
-  return apiRequest<AdminUser>("/api/app/admin/users", {
+export type BrandingInfo = {
+  product: string;
+  mark_light_url: string | null;
+  mark_dark_url: string | null;
+};
+
+export type AdminBranding = {
+  product_name: string | null;
+  mark_light_url: string | null;
+  mark_dark_url: string | null;
+};
+
+export type BrandingMarkVariant = "light" | "dark";
+
+async function brandingErrorMessage(response: Response, fallback: string) {
+  try {
+    const body = (await response.json()) as { error?: { message?: string } };
+    return body.error?.message ?? fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+/** Public branding, readable without a session (login page, shared memos). */
+export async function getPublicBranding(): Promise<BrandingInfo | null> {
+  try {
+    const response = await fetch("/api/app/branding");
+    if (!response.ok) return null;
+    return (await response.json()) as BrandingInfo;
+  } catch {
+    return null;
+  }
+}
+
+export async function getAdminBranding() {
+  return apiRequest<AdminBranding>("/api/app/admin/branding");
+}
+
+export async function updateAdminBrandingProductName(
+  product_name: string | null,
+) {
+  return apiRequest<{ product: string }>("/api/app/admin/branding", {
+    method: "PUT",
+    body: JSON.stringify({ product_name }),
+  });
+}
+
+export async function uploadAdminBrandingMark(
+  variant: BrandingMarkVariant,
+  file: File,
+) {
+  const bytes = await file.arrayBuffer();
+  const response = await fetch(`/api/app/admin/branding/marks/${variant}`, {
+    method: "PUT",
+    headers: { "content-type": file.type || "application/octet-stream" },
+    body: bytes,
+  });
+  if (!response.ok) {
+    throw new Error(
+      await brandingErrorMessage(response, "Failed to upload the logo."),
+    );
+  }
+  return (await response.json()) as { saved: boolean; variant: string };
+}
+
+export async function clearAdminBrandingMark(variant: BrandingMarkVariant) {
+  const response = await fetch(`/api/app/admin/branding/marks/${variant}`, {
+    method: "DELETE",
+  });
+  if (!response.ok) {
+    throw new Error(
+      await brandingErrorMessage(response, "Failed to remove the logo."),
+    );
+  }
+  return (await response.json()) as { removed: boolean; variant: string };
+}
+
+export async function createAdminUser(input: { name: string; email: string }) {
+  return apiRequest<
+    AdminUser & {
+      activation_path: string;
+      activation_expires_in_seconds: number;
+    }
+  >("/api/app/admin/users", {
     method: "POST",
     body: JSON.stringify(input),
   });
@@ -652,6 +717,19 @@ export async function deleteAdminUser(id: string) {
     `/api/app/admin/users/${encodeURIComponent(id)}`,
     {
       method: "DELETE",
+    },
+  );
+}
+
+export async function updateAdminUserRole(
+  id: string,
+  role: "admin" | "member",
+) {
+  return apiRequest<AdminUser>(
+    `/api/app/admin/users/${encodeURIComponent(id)}/role`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ role }),
     },
   );
 }
@@ -789,6 +867,34 @@ export async function hardDeleteMemo(id: string) {
   );
 }
 
+/**
+ * Reads an audio file's playback duration via a detached metadata probe so
+ * uploads report it in the attachment payload and the reading player can show
+ * the real length immediately. Best effort: any failure resolves undefined.
+ */
+async function readAudioDuration(file: File): Promise<number | undefined> {
+  if (!file.type.toLowerCase().startsWith("audio/")) return undefined;
+  const url = URL.createObjectURL(file);
+  const audio = document.createElement("audio");
+  return new Promise((resolve) => {
+    const settle = (value: number | undefined) => {
+      URL.revokeObjectURL(url);
+      resolve(
+        typeof value === "number" && Number.isFinite(value) && value > 0
+          ? Math.round(value)
+          : undefined,
+      );
+    };
+    audio.preload = "metadata";
+    audio.addEventListener("loadedmetadata", () => settle(audio.duration), {
+      once: true,
+    });
+    audio.addEventListener("error", () => settle(undefined), { once: true });
+    window.setTimeout(() => settle(undefined), 3000);
+    audio.src = url;
+  });
+}
+
 export async function uploadAttachment(input: {
   file: File;
   memo?: string;
@@ -802,25 +908,25 @@ export async function uploadAttachment(input: {
   if (input.clientId) {
     formData.set("client_id", input.clientId);
   }
+  const duration = await readAudioDuration(input.file);
+  if (duration !== undefined) {
+    formData.set("duration", String(duration));
+  }
   return apiRequest<Attachment>("/api/v1/attachments", {
     method: "POST",
     body: formData,
   });
 }
 
-export async function listMemoAttachments(memo: string) {
-  return apiRequest<ListAttachmentsResponse>(
+/**
+ * Replaces a memo's attachment binding list. Used to claim attachments that
+ * were uploaded before their memo existed (inline image paste). The web
+ * client's default legacy wire takes bare resource names here.
+ */
+export async function bindMemoAttachments(memo: string, names: string[]) {
+  return apiRequest<{ attachments: Attachment[] }>(
     `/api/v1/memos/${encodeURIComponent(memo)}/attachments`,
-  );
-}
-
-export async function bindMemoAttachments(memo: string, attachments: string[]) {
-  return apiRequest<ListAttachmentsResponse>(
-    `/api/v1/memos/${encodeURIComponent(memo)}/attachments`,
-    {
-      method: "PATCH",
-      body: JSON.stringify({ attachments }),
-    },
+    { method: "PATCH", body: JSON.stringify({ attachments: names }) },
   );
 }
 
@@ -880,6 +986,18 @@ export async function getPublicShare(token: string) {
   );
 }
 
+/**
+ * Fetch the complete small export bundle. The worker returns 413 when the
+ * bundle would exceed its inline response budget; callers can then fall back
+ * to the chunked export-task flow without guessing the payload size locally.
+ */
+export async function exportDataInline(includeBinary = true) {
+  const query = new URLSearchParams({
+    include_binary: String(includeBinary),
+  });
+  return apiRequest<ImportBundle>(`/api/v1/export?${query.toString()}`);
+}
+
 export async function createExportTask() {
   return apiRequest<{ task: DataTaskDto }>("/api/v1/export/tasks", {
     method: "POST",
@@ -891,6 +1009,10 @@ export async function getDataTask(id: string) {
   return apiRequest<{ task: DataTaskDto }>(
     `/api/v1/export/tasks/${encodeURIComponent(id)}`,
   );
+}
+
+export async function listDataTasks() {
+  return apiRequest<{ tasks: DataTaskDto[] }>("/api/v1/export/tasks");
 }
 
 export async function createImportTask(input: {

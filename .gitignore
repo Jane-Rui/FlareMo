@@ -11,3 +11,6 @@ test-results/
 playwright-report/
 backups/
 .zcode/
+/wrangler.jsonc
+.wrangler-shots/
+!/wrangler.jsonc

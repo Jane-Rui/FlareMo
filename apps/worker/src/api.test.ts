@@ -1,5 +1,3 @@
-import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
 import type {
   DeleteTagResponse,
   ListAppNotificationsResponse,
@@ -10,8 +8,8 @@ import type {
   TagHierarchyResponse,
 } from "@flaremo/contracts";
 import { FLAREMO_API_VERSION } from "@flaremo/contracts";
-import { createDb, memos } from "@flaremo/db";
-import { SELF_HOST_UNLIMITED } from "@flaremo/domain";
+import { applyFlaremoMigrations, createDb, memos } from "@flaremo/db";
+import { createMemberRemovalJob, SELF_HOST_UNLIMITED } from "@flaremo/domain";
 import { eq } from "drizzle-orm";
 import { Miniflare } from "miniflare";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -58,114 +56,153 @@ describe("FlareMo Worker API", () => {
       FLAREMO_BOOTSTRAP_SECRET: TEST_BOOTSTRAP_SECRET,
     } as Env;
 
-    const migration = await readFile(
-      resolve(
-        import.meta.dirname,
-        "../../../migrations/0000_illegal_inhumans.sql",
-      ),
-      "utf8",
-    );
-    const cleanup = await readFile(
-      resolve(
-        import.meta.dirname,
-        "../../../migrations/0001_familiar_morph.sql",
-      ),
-      "utf8",
-    );
-    const v020 = await readFile(
-      resolve(
-        import.meta.dirname,
-        "../../../migrations/0002_wooden_professor_monster.sql",
-      ),
-      "utf8",
-    );
-    const offlineCapture = await readFile(
-      resolve(
-        import.meta.dirname,
-        "../../../migrations/0003_equal_maximus.sql",
-      ),
-      "utf8",
-    );
-    const offlineAttachments = await readFile(
-      resolve(
-        import.meta.dirname,
-        "../../../migrations/0004_complex_the_enforcers.sql",
-      ),
-      "utf8",
-    );
-    const nativeAuth = await readFile(
-      resolve(
-        import.meta.dirname,
-        "../../../migrations/0005_confused_masque.sql",
-      ),
-      "utf8",
-    );
-    const reactionsSchema = await readFile(
-      resolve(import.meta.dirname, "../../../migrations/0006_silent_kylun.sql"),
-      "utf8",
-    );
-    const sseEvents = await readFile(
-      resolve(
-        import.meta.dirname,
-        "../../../migrations/0007_flat_phil_sheldon.sql",
-      ),
-      "utf8",
-    );
-    const userServiceParity = await readFile(
-      resolve(
-        import.meta.dirname,
-        "../../../migrations/0008_legal_scarecrow.sql",
-      ),
-      "utf8",
-    );
-    const webhookOutbox = await readFile(
-      resolve(
-        import.meta.dirname,
-        "../../../migrations/0009_neat_iron_fist.sql",
-      ),
-      "utf8",
-    );
-    const dataTasks = await readFile(
-      resolve(import.meta.dirname, "../../../migrations/0010_deep_gateway.sql"),
-      "utf8",
-    );
-    const memorySchema = await readFile(
-      resolve(import.meta.dirname, "../../../migrations/0011_daffy_ultron.sql"),
-      "utf8",
-    );
-    const embeddingSchema = await readFile(
-      resolve(
-        import.meta.dirname,
-        "../../../migrations/0012_slow_nick_fury.sql",
-      ),
-      "utf8",
-    );
-    const projectsSchema = await readFile(
-      resolve(
-        import.meta.dirname,
-        "../../../migrations/0013_nosy_luke_cage.sql",
-      ),
-      "utf8",
-    );
-    await applyMigration(db, migration);
-    await applyMigration(db, cleanup);
-    await applyMigration(db, v020);
-    await applyMigration(db, offlineCapture);
-    await applyMigration(db, offlineAttachments);
-    await applyMigration(db, nativeAuth);
-    await applyMigration(db, reactionsSchema);
-    await applyMigration(db, sseEvents);
-    await applyMigration(db, userServiceParity);
-    await applyMigration(db, webhookOutbox);
-    await applyMigration(db, dataTasks);
-    await applyMigration(db, memorySchema);
-    await applyMigration(db, embeddingSchema);
-    await applyMigration(db, projectsSchema);
+    await applyFlaremoMigrations(db);
     sessionCookie = await bootstrapAndSignIn();
   });
 
   afterEach(async () => {
     await mf.dispose();
+  });
+
+  it("protects capture capability and WebSocket with browser auth and exact Origin", async () => {
+    const base = "http://flaremo.test/api/app/capture";
+    const raw = (path: string, headers: Record<string, string> = {}) =>
+      app.fetch(new Request(base + path, { headers }), env);
+    const rateLimitKeys: string[] = [];
+    Object.assign(env, {
+      RATE_LIMITER: {
+        limit: async (input: { key: string }) => {
+          rateLimitKeys.push(input.key);
+          return { success: false };
+        },
+      },
+    });
+    expect((await raw("/status")).status).toBe(401);
+    expect(
+      (
+        await raw("/ws", {
+          origin: "http://flaremo.test",
+          upgrade: "websocket",
+        })
+      ).status,
+    ).toBe(401);
+    const authenticated = { cookie: sessionCookie };
+    const unavailable = await raw("/status", authenticated);
+    expect(await unavailable.json()).toEqual({
+      available: false,
+      provider: null,
+      streaming: false,
+    });
+    expect(
+      (
+        await raw("/ws", {
+          ...authenticated,
+          origin: "http://flaremo.test",
+          upgrade: "websocket",
+        })
+      ).status,
+    ).toBe(503);
+    Object.assign(env, {
+      FLAREMO_ASR_DASHSCOPE_API_KEY: "test-only-asr-secret",
+    });
+    const available = await raw("/status", authenticated);
+    expect(available.headers.get("cache-control")).toBe("no-store");
+    const body = await available.text();
+    expect(JSON.parse(body)).toEqual({
+      available: true,
+      provider: "dashscope",
+      streaming: true,
+    });
+    expect(body).not.toContain("test-only-asr-secret");
+    for (const origin of [
+      "https://evil.test",
+      "http://flaremo.test.evil.test",
+      "null",
+      "",
+    ]) {
+      expect(
+        (await raw("/ws", { ...authenticated, origin, upgrade: "websocket" }))
+          .status,
+      ).toBe(403);
+    }
+    expect(
+      (await raw("/ws", { ...authenticated, origin: "http://flaremo.test" }))
+        .status,
+    ).toBe(426);
+    expect(rateLimitKeys).toEqual([]);
+    expect(
+      (
+        await raw("/ws", {
+          ...authenticated,
+          origin: "http://flaremo.test",
+          upgrade: "websocket",
+          "cf-connecting-ip": "203.0.113.8",
+        })
+      ).status,
+    ).toBe(429);
+    expect(rateLimitKeys).toHaveLength(1);
+    expect(rateLimitKeys[0]).toMatch(/^capture:[^:]+$/);
+    expect(rateLimitKeys[0]).not.toContain("203.0.113.8");
+    expect(
+      (
+        await raw("/status", {
+          ...authenticated,
+          authorization: "Bearer memos_pat_test",
+        })
+      ).status,
+    ).toBe(401);
+    expect(rateLimitKeys).toHaveLength(1);
+  });
+
+  it("exposes Tencent capability only when complete, with the same browser and Origin guards", async () => {
+    Object.assign(env, {
+      FLAREMO_ASR_PROVIDER: "tencent",
+      FLAREMO_ASR_TENCENT_SECRET_ID: "test-tencent-secret-id",
+      FLAREMO_ASR_TENCENT_SECRET_KEY: "test-tencent-secret-key",
+    });
+    const base = "http://flaremo.test/api/app/capture";
+    const raw = (path: string, headers: Record<string, string> = {}) =>
+      app.fetch(new Request(base + path, { headers }), env);
+    const headers = { cookie: sessionCookie, origin: "http://flaremo.test" };
+    expect(await (await raw("/status", headers)).json()).toEqual({
+      available: false,
+      provider: null,
+      streaming: false,
+    });
+    expect(
+      (await raw("/ws", { ...headers, upgrade: "websocket" })).status,
+    ).toBe(503);
+    Object.assign(env, { FLAREMO_ASR_TENCENT_APP_ID: "1234567890" });
+    const response = await raw("/status", headers);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(await response.json()).toEqual({
+      available: true,
+      provider: "tencent",
+      streaming: true,
+    });
+    expect((await raw("/status")).status).toBe(401);
+    expect(
+      (
+        await raw("/status", {
+          ...headers,
+          authorization: "Bearer memos_pat_test",
+        })
+      ).status,
+    ).toBe(401);
+    expect(
+      (await raw("/ws", { origin: headers.origin, upgrade: "websocket" }))
+        .status,
+    ).toBe(401);
+    expect(
+      (
+        await raw("/ws", {
+          ...headers,
+          origin: "https://evil.test",
+          upgrade: "websocket",
+        })
+      ).status,
+    ).toBe(403);
+    expect((await raw("/ws", headers)).status).toBe(426);
   });
 
   it("supports memo CRUD, tag filtering, trash, OpenAPI, and MCP", async () => {
@@ -343,6 +380,18 @@ describe("FlareMo Worker API", () => {
     ).toEqual([normal.name]);
   });
 
+  it("finds a substring inside continuous Chinese capture text", async () => {
+    const created = await createMemo<{ name: string }>(
+      "这是一次语音记录准确性测试，今天讨论高性能数据安全和知识检索。",
+    );
+    const result = await json<ListMemosResponse>(
+      await fetchApp(
+        `http://flaremo.test/api/app/memos?q=${encodeURIComponent("高性能数据安全")}`,
+      ),
+    );
+    expect(result.memos.map((memo) => memo.name)).toContain(created.name);
+  });
+
   it("initializes the single owner idempotently under concurrent requests", async () => {
     const [memosResponse, statsResponse] = await Promise.all([
       fetchApp("http://flaremo.test/api/app/memos"),
@@ -446,6 +495,102 @@ describe("FlareMo Worker API", () => {
         "https://github.com/example/flaremo/actions/workflows/flaremo-update.yml",
       releases_url: "https://github.com/realchendahuang/FlareMo/releases",
     });
+  });
+
+  it("serves default branding to anonymous visitors", async () => {
+    const response = await fetchApp(
+      "http://flaremo.test/api/app/branding",
+      { method: "GET" },
+      { authenticated: false },
+    );
+    expect(response.status).toBe(200);
+    const body = await json<{ product: string; mark_light_url: string | null }>(
+      response,
+    );
+    expect(body.product).toBe("FlareMo");
+    expect(body.mark_light_url).toBeNull();
+  });
+
+  it("reflects a custom product name in public branding and health", async () => {
+    const put = await fetchApp("http://flaremo.test/api/app/admin/branding", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ product_name: "KOS Notes" }),
+    });
+    expect(put.status).toBe(200);
+    const anonymous = await fetchApp(
+      "http://flaremo.test/api/app/branding",
+      { method: "GET" },
+      { authenticated: false },
+    );
+    expect((await json<{ product: string }>(anonymous)).product).toBe(
+      "KOS Notes",
+    );
+    const health = await json(
+      await fetchApp("http://flaremo.test/api/app/health"),
+    );
+    expect(health.product).toBe("KOS Notes");
+  });
+
+  it("uploads, serves, and removes a custom logo mark", async () => {
+    // Minimal 1x1 PNG.
+    const png = Uint8Array.from(
+      atob(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+      ),
+      (char) => char.charCodeAt(0),
+    );
+    const upload = await fetchApp(
+      "http://flaremo.test/api/app/admin/branding/marks/light",
+      {
+        body: png,
+        headers: { "content-type": "image/png" },
+        method: "PUT",
+      },
+    );
+    expect(upload.status).toBe(200);
+
+    const anonymous = await fetchApp(
+      "http://flaremo.test/api/app/branding",
+      { method: "GET" },
+      { authenticated: false },
+    );
+    const branding = await json<{ mark_light_url: string | null }>(anonymous);
+    expect(branding.mark_light_url).toContain("/api/app/branding/marks/light");
+
+    const mark = await fetchApp(
+      `http://flaremo.test${branding.mark_light_url}`,
+      { method: "GET" },
+      { authenticated: false },
+    );
+    expect(mark.status).toBe(200);
+    expect(mark.headers.get("content-type")).toBe("image/png");
+
+    const remove = await fetchApp(
+      "http://flaremo.test/api/app/admin/branding/marks/light",
+      { method: "DELETE" },
+    );
+    expect(remove.status).toBe(200);
+    const after = await fetchApp(
+      "http://flaremo.test/api/app/branding",
+      { method: "GET" },
+      { authenticated: false },
+    );
+    expect(
+      (await json<{ mark_light_url: string | null }>(after)).mark_light_url,
+    ).toBeNull();
+  });
+
+  it("rejects unsupported logo content types", async () => {
+    const response = await fetchApp(
+      "http://flaremo.test/api/app/admin/branding/marks/light",
+      {
+        body: "<svg></svg>",
+        headers: { "content-type": "text/html" },
+        method: "PUT",
+      },
+    );
+    expect(response.status).toBe(400);
   });
 
   it("does not create an update link from an invalid repository value", async () => {
@@ -1201,12 +1346,70 @@ describe("FlareMo Worker API", () => {
     );
     await app.scheduled(
       {
-        scheduledTime: Date.now() + 2 * 24 * 60 * 60 * 1_000,
+        // Past the 7-day unbound-orphan grace period, so the created orphan
+        // is inside the GC window.
+        scheduledTime: Date.now() + 9 * 24 * 60 * 60 * 1_000,
       } as ScheduledController,
       env,
     );
     expect(
       await fetchApp(`http://flaremo.test/api/v1/${orphan.name}`),
+    ).toMatchObject({ status: 404 });
+  });
+
+  it("recovers a raw memo-row delete through the attachment GC", async () => {
+    const memo = await createMemo("rogue hard delete");
+    const attachment = await uploadAttachment(memo.name);
+    // A hard-delete path that skips the marker entirely: drop the memo row
+    // directly so attachment rows keep no `deleting` state — only the
+    // unbound-orphan clause can still reclaim the binary. (Production D1
+    // nulls attachment.memo_id via the FK cascade; Miniflare does not, so
+    // mimic that step explicitly.)
+    await env.DB.prepare(
+      "UPDATE attachments SET memo_id = NULL WHERE memo_id = ?",
+    )
+      .bind(memo.name)
+      .run();
+    await env.DB.prepare("DELETE FROM memos WHERE id = ?")
+      .bind(memo.name)
+      .run();
+    await app.scheduled(
+      {
+        scheduledTime: Date.now() + 9 * 24 * 60 * 60 * 1_000,
+      } as ScheduledController,
+      env,
+    );
+    expect(
+      await fetchApp(`http://flaremo.test/api/v1/${attachment.name}`),
+    ).toMatchObject({ status: 404 });
+  });
+
+  it("purges recycle-bin memos past the trash retention window", async () => {
+    const memo = await createMemo("expired trash");
+    const attachment = await uploadAttachment(memo.name);
+    await json(
+      await fetchApp(`http://flaremo.test/api/app/memos/${memo.id}`, {
+        method: "DELETE",
+      }),
+    );
+    // Backdate deletedAt beyond the default 30-day retention. Raw D1 here:
+    // drizzle updates without a consuming clause don't always flush in the
+    // Miniflare test harness.
+    await env.DB.prepare("UPDATE memos SET deleted_at = ? WHERE id = ?")
+      .bind(
+        new Date(Date.now() - 45 * 24 * 60 * 60 * 1_000).toISOString(),
+        memo.name,
+      )
+      .run();
+    await app.scheduled(
+      { scheduledTime: Date.now() } as ScheduledController,
+      env,
+    );
+    expect(
+      await fetchApp(`http://flaremo.test/api/app/memos/${memo.id}`),
+    ).toMatchObject({ status: 404 });
+    expect(
+      await fetchApp(`http://flaremo.test/api/v1/${attachment.name}`),
     ).toMatchObject({ status: 404 });
   });
 
@@ -1563,7 +1766,7 @@ describe("FlareMo Worker API", () => {
 
   it("applies per-user limits independently of the deployment limits", async () => {
     const userLimitsApp = createFlareMoApp({
-      resolveUserPlanLimits: (env, userId) =>
+      resolveUserPlanLimits: (_env, userId) =>
         userId === "users/owner" // the bootstrap owner only
           ? {
               attachmentStorageBytes: 10,
@@ -2351,6 +2554,735 @@ describe("FlareMo Worker API", () => {
     const body = await response.json<{ error: { message: string } }>();
     expect(body.error.message).toContain("Member limit");
   });
+
+  it("enforces team visibility and retains team content after removal", async () => {
+    const createMemberResponse = await app.fetch(
+      new Request("http://flaremo.test/api/app/admin/users", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          cookie: sessionCookie,
+          origin: "http://flaremo.test",
+        },
+        body: JSON.stringify({
+          name: "Team Member",
+          email: "team-member@example.com",
+          password: TEST_PASSWORD,
+        }),
+      }),
+      env,
+    );
+    expect(createMemberResponse.status).toBe(201);
+    const member = await createMemberResponse.json<{
+      id: string;
+      activation_path: string;
+    }>();
+
+    const updateRole = async (role: "admin" | "member") =>
+      app.fetch(
+        new Request(
+          `http://flaremo.test/api/app/admin/users/${encodeURIComponent(member.id)}/role`,
+          {
+            method: "PATCH",
+            headers: {
+              "content-type": "application/json",
+              cookie: sessionCookie,
+              origin: "http://flaremo.test",
+            },
+            body: JSON.stringify({ role }),
+          },
+        ),
+        env,
+      );
+    expect((await updateRole("admin")).status).toBe(200);
+    expect((await updateRole("member")).status).toBe(200);
+
+    const activationToken = new URL(
+      `http://flaremo.test${member.activation_path}`,
+    ).searchParams.get("token");
+    const reset = await app.fetch(
+      new Request("http://flaremo.test/api/auth/reset-password", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: "http://flaremo.test",
+        },
+        body: JSON.stringify({
+          token: activationToken,
+          newPassword: TEST_PASSWORD,
+        }),
+      }),
+      env,
+    );
+    expect(reset.status).toBe(200);
+    const signIn = await app.fetch(
+      new Request("http://flaremo.test/api/auth/sign-in/email", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: "http://flaremo.test",
+        },
+        body: JSON.stringify({
+          email: "team-member@example.com",
+          password: TEST_PASSWORD,
+        }),
+      }),
+      env,
+    );
+    expect(signIn.status).toBe(200);
+    const memberCookie = extractCookieHeader(signIn);
+
+    const createMemberMemo = async (visibility: "private" | "protected") => {
+      const response = await app.fetch(
+        new Request("http://flaremo.test/api/app/memos", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            cookie: memberCookie,
+            origin: "http://flaremo.test",
+          },
+          body: JSON.stringify({
+            content: `${visibility} member memo`,
+            visibility,
+          }),
+        }),
+        env,
+      );
+      expect(response.status).toBe(201);
+      return response.json<{ id: string }>();
+    };
+    const privateMemo = await createMemberMemo("private");
+    const teamMemo = await createMemberMemo("protected");
+
+    const readAsOwner = (memoId: string) =>
+      app.fetch(
+        new Request(`http://flaremo.test/api/app/memos/${memoId}`, {
+          headers: { cookie: sessionCookie },
+        }),
+        env,
+      );
+    expect((await readAsOwner(privateMemo.id)).status).toBe(404);
+    const teamResponse = await readAsOwner(teamMemo.id);
+    expect(teamResponse.status).toBe(200);
+    expect(
+      await teamResponse.json<{
+        can_manage: boolean;
+        memo: { creator_name?: string };
+      }>(),
+    ).toMatchObject({
+      can_manage: true,
+      memo: { creator_name: "Team Member" },
+    });
+
+    const removeResponse = await app.fetch(
+      new Request(
+        `http://flaremo.test/api/app/admin/users/${encodeURIComponent(member.id)}`,
+        {
+          method: "DELETE",
+          headers: { cookie: sessionCookie, origin: "http://flaremo.test" },
+        },
+      ),
+      env,
+    );
+    expect(removeResponse.status).toBe(200);
+    expect(
+      (
+        await app.fetch(
+          new Request("http://flaremo.test/api/app/health", {
+            headers: { cookie: memberCookie },
+          }),
+          env,
+        )
+      ).status,
+    ).toBe(401);
+    expect((await readAsOwner(privateMemo.id)).status).toBe(404);
+    const retainedResponse = await readAsOwner(teamMemo.id);
+    expect(retainedResponse.status).toBe(200);
+    expect(
+      (await retainedResponse.json<{ memo: { creator_name?: string } }>()).memo
+        .creator_name,
+    ).toBe("Team Member");
+  });
+
+  it("protects the last active administrator through the admin API", async () => {
+    const secondAdmin = await createActivatedMember(
+      "second-admin@example.com",
+      "Second Admin",
+    );
+    const setRole = (
+      memberId: string,
+      role: "admin" | "member",
+      cookie: string,
+    ) =>
+      app.fetch(
+        new Request(
+          `http://flaremo.test/api/app/admin/users/${encodeURIComponent(memberId)}/role`,
+          {
+            method: "PATCH",
+            headers: {
+              "content-type": "application/json",
+              cookie,
+              origin: "http://flaremo.test",
+            },
+            body: JSON.stringify({ role }),
+          },
+        ),
+        env,
+      );
+
+    expect((await setRole(secondAdmin.id, "admin", sessionCookie)).status).toBe(
+      200,
+    );
+    // Demoting the second administrator succeeds while the owner remains the
+    // other active administrator.
+    const demoted = await setRole(secondAdmin.id, "member", sessionCookie);
+    expect(demoted.status).toBe(200);
+    expect((await demoted.json<{ role: string }>()).role).toBe("member");
+    expect((await setRole(secondAdmin.id, "admin", sessionCookie)).status).toBe(
+      200,
+    );
+
+    // With the owner as the last active administrator, demoting or removing it
+    // must fail closed even when another administrator issues the request.
+    const demoteOwner = await setRole(
+      "users/owner",
+      "member",
+      secondAdmin.cookie,
+    );
+    expect(demoteOwner.status).toBe(403);
+    expect(await demoteOwner.json()).toEqual({
+      error: { message: "The owner role cannot be changed." },
+    });
+
+    const removeOwner = await app.fetch(
+      new Request(
+        `http://flaremo.test/api/app/admin/users/${encodeURIComponent("users/owner")}`,
+        {
+          method: "DELETE",
+          headers: {
+            cookie: secondAdmin.cookie,
+            origin: "http://flaremo.test",
+          },
+        },
+      ),
+      env,
+    );
+    expect(removeOwner.status).toBe(403);
+    expect(await removeOwner.json()).toEqual({
+      error: { message: "The owner account cannot be removed." },
+    });
+
+    // A reset token mints a credential, so the same takeover guard applies:
+    // an administrator cannot reset the owner's password, and only the owner
+    // can reset another administrator's.
+    const resetOwnerPassword = await app.fetch(
+      new Request(
+        `http://flaremo.test/api/app/admin/users/${encodeURIComponent("users/owner")}/reset-password`,
+        {
+          method: "POST",
+          headers: {
+            cookie: secondAdmin.cookie,
+            origin: "http://flaremo.test",
+          },
+        },
+      ),
+      env,
+    );
+    expect(resetOwnerPassword.status).toBe(403);
+    expect(await resetOwnerPassword.json()).toEqual({
+      error: {
+        message: "The owner password cannot be reset through the admin API.",
+      },
+    });
+
+    const resetAdminPassword = await app.fetch(
+      new Request(
+        `http://flaremo.test/api/app/admin/users/${encodeURIComponent(secondAdmin.id)}/reset-password`,
+        {
+          method: "POST",
+          headers: {
+            cookie: secondAdmin.cookie,
+            origin: "http://flaremo.test",
+          },
+        },
+      ),
+      env,
+    );
+    expect(resetAdminPassword.status).toBe(403);
+    expect(await resetAdminPassword.json()).toEqual({
+      error: {
+        message: "Only the owner can reset another administrator's password.",
+      },
+    });
+
+    const removeSelf = await app.fetch(
+      new Request(
+        `http://flaremo.test/api/app/admin/users/${encodeURIComponent(secondAdmin.id)}`,
+        {
+          method: "DELETE",
+          headers: {
+            cookie: secondAdmin.cookie,
+            origin: "http://flaremo.test",
+          },
+        },
+      ),
+      env,
+    );
+    expect(removeSelf.status).toBe(403);
+    expect(await removeSelf.json()).toEqual({
+      error: { message: "You cannot remove yourself from the team." },
+    });
+
+    const members = await json<{
+      users: Array<{ id: string; role: string; status: string }>;
+    }>(await fetchApp("http://flaremo.test/api/app/admin/users"));
+    expect(members.users.find((user) => user.id === "users/owner")).toEqual(
+      expect.objectContaining({ role: "owner", status: "active" }),
+    );
+  });
+
+  it("invalidates a removed member's personal access token", async () => {
+    const member = await createActivatedMember(
+      "pat-member@example.com",
+      "Pat Member",
+    );
+    const createdToken = await json<{
+      token: string;
+      personal_access_token: { id: string; enabled: boolean };
+    }>(
+      await app.fetch(
+        new Request(
+          "http://flaremo.test/api/app/account/personal-access-tokens",
+          {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              cookie: member.cookie,
+              origin: "http://flaremo.test",
+            },
+            body: JSON.stringify({ name: "CLI token", expires_in_days: 30 }),
+          },
+        ),
+        env,
+      ),
+    );
+    expect(createdToken.token).toMatch(/^memos_pat_/);
+    expect(createdToken.personal_access_token.enabled).toBe(true);
+
+    const patMemosBefore = await app.fetch(
+      new Request("http://flaremo.test/api/v1/memos", {
+        headers: {
+          authorization: `Bearer ${createdToken.token}`,
+          "x-flaremo-wire": "legacy",
+        },
+      }),
+      env,
+    );
+    expect(patMemosBefore.status).toBe(200);
+
+    await json(
+      await fetchApp(
+        `http://flaremo.test/api/app/admin/users/${encodeURIComponent(member.id)}`,
+        { method: "DELETE" },
+      ),
+    );
+
+    const patMemosAfter = await app.fetch(
+      new Request("http://flaremo.test/api/v1/memos", {
+        headers: {
+          authorization: `Bearer ${createdToken.token}`,
+          "x-flaremo-wire": "legacy",
+        },
+      }),
+      env,
+    );
+    expect(patMemosAfter.status).toBe(401);
+    // A PAT must not reach the browser-facing surface either.
+    const patAppHealth = await app.fetch(
+      new Request("http://flaremo.test/api/app/health", {
+        headers: { authorization: `Bearer ${createdToken.token}` },
+      }),
+      env,
+    );
+    expect(patAppHealth.status).toBe(401);
+  });
+
+  it("replays member removal without deleting retained team or public content", async () => {
+    const removed = await createActivatedMember(
+      "replay-removed@example.com",
+      "Replay Removed",
+    );
+    const spectator = await createActivatedMember(
+      "replay-spectator@example.com",
+      "Replay Spectator",
+    );
+
+    const removedPrivateId = await createMemoAs(
+      removed.cookie,
+      "replay private",
+      "private",
+    );
+    const removedTeamId = await createMemoAs(
+      removed.cookie,
+      "replay team",
+      "protected",
+    );
+    const removedPublicId = await createMemoAs(
+      removed.cookie,
+      "replay public",
+      "public",
+    );
+    const spectatorTeamId = await createMemoAs(
+      spectator.cookie,
+      "spectator team",
+      "protected",
+    );
+    const ownerAnchor = await createMemo<{ id: string }>("owner replay anchor");
+
+    await json(
+      await fetchApp(
+        `http://flaremo.test/api/app/admin/users/${encodeURIComponent(removed.id)}`,
+        { method: "DELETE" },
+      ),
+    );
+
+    // Replay the same removal through the shared queued-job executor; a
+    // retried or doubly-queued job must be a safe no-op.
+    const replayJob = await createMemberRemovalJob(
+      createDb(env.DB),
+      removed.id,
+      "users/owner",
+    );
+    await app.scheduled(
+      { scheduledTime: Date.now() } as ScheduledController,
+      env,
+    );
+
+    const job = await json<{ job: { status: string; phase: string } }>(
+      await fetchApp(
+        `http://flaremo.test/api/app/admin/member-removal-jobs/${replayJob.id}`,
+      ),
+    );
+    expect(job.job).toMatchObject({ status: "completed", phase: "completed" });
+
+    const readMemo = (memoId: string) =>
+      fetchApp(`http://flaremo.test/api/app/memos/${memoId}`);
+    expect((await readMemo(removedPrivateId)).status).toBe(404);
+
+    const retainedRows = await env.DB.prepare(
+      "SELECT id, visibility, user_id FROM memos WHERE id IN (?, ?, ?, ?, ?)",
+    )
+      .bind(
+        `memos/${removedPrivateId}`,
+        `memos/${removedTeamId}`,
+        `memos/${removedPublicId}`,
+        `memos/${spectatorTeamId}`,
+        `memos/${ownerAnchor.id}`,
+      )
+      .all<{ id: string; visibility: string; user_id: string }>();
+    const retained = new Map(retainedRows.results.map((row) => [row.id, row]));
+    expect(retained.has(`memos/${removedPrivateId}`)).toBe(false);
+    expect(retained.get(`memos/${removedTeamId}`)).toMatchObject({
+      visibility: "protected",
+      user_id: removed.id,
+    });
+    expect(retained.get(`memos/${removedPublicId}`)).toMatchObject({
+      visibility: "public",
+      user_id: removed.id,
+    });
+    expect(retained.get(`memos/${spectatorTeamId}`)).toMatchObject({
+      visibility: "protected",
+      user_id: spectator.id,
+    });
+    expect(retained.get(`memos/${ownerAnchor.id}`)).toMatchObject({
+      user_id: "users/owner",
+    });
+
+    // The retained team memo still renders with its historical author name.
+    const teamRead = await json<{
+      memo: { creator_name?: string; visibility: string };
+    }>(await readMemo(removedTeamId));
+    expect(teamRead.memo).toMatchObject({
+      creator_name: "Replay Removed",
+      visibility: "protected",
+    });
+    expect((await readMemo(removedPublicId)).status).toBe(200);
+    expect((await readMemo(spectatorTeamId)).status).toBe(200);
+    expect((await readMemo(ownerAnchor.id)).status).toBe(200);
+
+    const spectatorRow = await env.DB.prepare(
+      "SELECT status FROM users WHERE id = ?",
+    )
+      .bind(spectator.id)
+      .first<{ status: string }>();
+    expect(spectatorRow?.status).toBe("active");
+  });
+
+  it("converts legacy protected memos to private during the team-mode upgrade", async () => {
+    // Rebuild the shared harness so migration 0014 runs on top of legacy data
+    // instead of over an empty database.
+    await mf.dispose();
+    mf = new Miniflare({
+      script: "export default { fetch() { return new Response('ok') } }",
+      modules: true,
+      compatibilityDate: "2026-07-10",
+      compatibilityFlags: ["nodejs_compat"],
+      d1Databases: { DB: "flaremo-upgrade-test" },
+      r2Buckets: { ATTACHMENTS: "flaremo-attachments-upgrade-test" },
+    });
+    const database = await mf.getD1Database("DB");
+    env = {
+      ...env,
+      DB: database,
+      ATTACHMENTS: await mf.getR2Bucket("ATTACHMENTS"),
+    } as Env;
+
+    // A pre-team-mode deployment: no users.status column, `protected` in use.
+    await applyFlaremoMigrations(database, { beforeTag: "0014_" });
+    await database
+      .prepare(
+        "INSERT INTO users (id, email, name, role, created_at, updated_at) VALUES ('users/owner', 'owner@example.com', 'Owner', 'owner', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')",
+      )
+      .run();
+    const seedLegacyMemo = (id: string, visibility: string) =>
+      database
+        .prepare(
+          "INSERT INTO memos (id, user_id, content, visibility, created_at, updated_at) VALUES (?, 'users/owner', ?, ?, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')",
+        )
+        .bind(id, `legacy ${visibility} memo`, visibility)
+        .run();
+    await seedLegacyMemo("memos/legacy-team", "protected");
+    await seedLegacyMemo("memos/legacy-public", "public");
+    await database
+      .prepare(
+        "INSERT INTO attachments (id, user_id, memo_id, r2_key, filename, created_at, updated_at) VALUES ('attachments/legacy', 'users/owner', 'memos/legacy-team', 'legacy/object', 'legacy.txt', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')",
+      )
+      .run();
+
+    await applyFlaremoMigrations(database, { fromTag: "0014_" });
+    sessionCookie = await bootstrapAndSignIn();
+
+    const upgraded = await database
+      .prepare(
+        "SELECT id, visibility FROM memos WHERE id LIKE 'memos/legacy-%'",
+      )
+      .all<{ id: string; visibility: string }>();
+    expect(
+      Object.fromEntries(
+        upgraded.results.map((row) => [row.id, row.visibility]),
+      ),
+    ).toEqual({
+      "memos/legacy-team": "private",
+      "memos/legacy-public": "public",
+    });
+
+    // The converted memo keeps working as the owner's private note. The app
+    // route takes the bare id and resolves the `memos/`-prefixed row itself.
+    const context = await json<{
+      memo: { visibility: string; content: string };
+    }>(await fetchApp("http://flaremo.test/api/app/memos/legacy-team"));
+    expect(context.memo).toMatchObject({
+      visibility: "private",
+      content: "legacy protected memo",
+    });
+
+    expect(
+      await database
+        .prepare("SELECT status FROM users WHERE id = 'users/owner'")
+        .first<{ status: string }>(),
+    ).toEqual({ status: "active" });
+    expect(
+      await database
+        .prepare(
+          "SELECT memo_id, r2_key, filename FROM attachments WHERE id = 'attachments/legacy'",
+        )
+        .first<{ filename: string; memo_id: string; r2_key: string }>(),
+    ).toEqual({
+      filename: "legacy.txt",
+      memo_id: "memos/legacy-team",
+      r2_key: "legacy/object",
+    });
+    const upgradeObjects = await database
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE name IN ('member_removal_jobs', 'users_role_status_idx', 'memos_user_created_id_idx', 'attachments_cleanup_idx') ORDER BY name",
+      )
+      .all<{ name: string }>();
+    expect(upgradeObjects.results.map((row) => row.name)).toEqual([
+      "attachments_cleanup_idx",
+      "member_removal_jobs",
+      "memos_user_created_id_idx",
+      "users_role_status_idx",
+    ]);
+  });
+
+  it("rejects public registration while the deployment default keeps it closed", async () => {
+    const status = await json<{ registration_open: boolean }>(
+      await fetchApp("http://flaremo.test/api/auth/flaremo/register/status"),
+    );
+    expect(status.registration_open).toBe(false);
+
+    const settings = await json<{ registration_open: boolean }>(
+      await fetchApp("http://flaremo.test/api/app/admin/settings"),
+    );
+    expect(settings.registration_open).toBe(false);
+
+    const closed = await fetchApp(
+      "http://flaremo.test/api/auth/flaremo/register",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          // fetchApp only auto-supplies the origin on /api/app and /api/v1
+          // paths; the anonymous register endpoint needs it explicitly.
+          origin: "http://flaremo.test",
+        },
+        body: JSON.stringify({
+          name: "Member",
+          email: "closed-default@example.com",
+          password: TEST_PASSWORD,
+        }),
+      },
+    );
+    expect(closed.status).toBe(403);
+    expect(await closed.json()).toEqual({
+      error: { message: "Registration is currently closed." },
+    });
+
+    // The rejected registration must not leave a member behind.
+    const users = await env.DB.prepare("SELECT id FROM users").all<{
+      id: string;
+    }>();
+    expect(users.results.map((row) => row.id)).toEqual(["users/owner"]);
+  });
+
+  it("keeps a member's private memos out of other members' full-text search", async () => {
+    const author = await createActivatedMember(
+      "search-author@example.com",
+      "Search Author",
+    );
+    const reader = await createActivatedMember(
+      "search-reader@example.com",
+      "Search Reader",
+    );
+
+    const authorPrivateId = await createMemoAs(
+      author.cookie,
+      "veilstone-crystal private plan",
+      "private",
+    );
+    const authorTeamId = await createMemoAs(
+      author.cookie,
+      "veilstone-crystal team plan",
+      "protected",
+    );
+
+    // Member B's full-text search must not surface member A's private memo.
+    const readerSearch = await json<{ memos: Array<{ id: string }> }>(
+      await app.fetch(
+        new Request("http://flaremo.test/api/app/memos?q=veilstone-crystal", {
+          headers: { cookie: reader.cookie },
+        }),
+        env,
+      ),
+    );
+    expect(readerSearch.memos.map((memo) => memo.id)).toEqual([authorTeamId]);
+
+    // The administrator's search is bound by the same visibility matrix.
+    const adminSearch = await json<{ memos: Array<{ id: string }> }>(
+      await fetchApp("http://flaremo.test/api/app/memos?q=veilstone-crystal"),
+    );
+    expect(adminSearch.memos.map((memo) => memo.id)).toEqual([authorTeamId]);
+
+    // The legacy Memos-compatible wire applies the same boundary; its DTO
+    // exposes the row id as `name` and the bare uuid as `id`.
+    const legacySearch = await json<{ memos: Array<{ name: string }> }>(
+      await app.fetch(
+        new Request("http://flaremo.test/api/v1/memos?q=veilstone-crystal", {
+          headers: { cookie: reader.cookie, "x-flaremo-wire": "legacy" },
+        }),
+        env,
+      ),
+    );
+    expect(legacySearch.memos.map((memo) => memo.name)).toEqual([
+      `memos/${authorTeamId}`,
+    ]);
+
+    // Positive control: the author still finds both of her own notes.
+    const authorSearch = await json<{ memos: Array<{ id: string }> }>(
+      await app.fetch(
+        new Request("http://flaremo.test/api/app/memos?q=veilstone-crystal", {
+          headers: { cookie: author.cookie },
+        }),
+        env,
+      ),
+    );
+    expect(authorSearch.memos.map((memo) => memo.id).sort()).toEqual(
+      [authorPrivateId, authorTeamId].sort(),
+    );
+  });
+
+  it("exposes context attachments newest first and stores uploaded duration", async () => {
+    const memo = await createMemo<{ id: string; name: string }>(
+      "attachment ordering",
+    );
+
+    const formDataOld = new FormData();
+    formDataOld.set("memo", memo.name);
+    formDataOld.set(
+      "file",
+      new File(["old"], "old.txt", { type: "text/plain" }),
+    );
+    const first = await json<{ name: string }>(
+      await fetchApp("http://flaremo.test/api/v1/attachments", {
+        method: "POST",
+        body: formDataOld,
+      }),
+    );
+
+    const formDataNew = new FormData();
+    formDataNew.set("memo", memo.name);
+    formDataNew.set(
+      "file",
+      new File(["RIFF----WAVE"], "clip.wav", { type: "audio/wav" }),
+    );
+    formDataNew.set("duration", "3");
+    const second = await json<{
+      name: string;
+      payload: Record<string, unknown>;
+    }>(
+      await fetchApp("http://flaremo.test/api/v1/attachments", {
+        method: "POST",
+        body: formDataNew,
+      }),
+    );
+    expect(second.payload).toEqual({ duration: 3 });
+
+    // A malformed duration is decoration: ignore it, never fail the upload.
+    const formDataBad = new FormData();
+    formDataBad.set("memo", memo.name);
+    formDataBad.set(
+      "file",
+      new File(["x"], "broken.wav", { type: "audio/wav" }),
+    );
+    formDataBad.set("duration", "abc");
+    const third = await json<{ payload: Record<string, unknown> }>(
+      await fetchApp("http://flaremo.test/api/v1/attachments", {
+        method: "POST",
+        body: formDataBad,
+      }),
+    );
+    expect(third.payload).toEqual({});
+
+    // The list endpoints order newest first; the reading view must agree.
+    const context = await json<{ attachments: Array<{ name: string }> }>(
+      await fetchApp(`http://flaremo.test/api/app/memos/${memo.id}`),
+    );
+    expect(context.attachments.map((attachment) => attachment.name)).toEqual([
+      third.name ?? "attachments/missing",
+      second.name,
+      first.name,
+    ]);
+  });
 });
 
 function fetchApp(
@@ -2442,18 +3374,98 @@ async function createMemo<T = Record<string, unknown>>(content: string) {
   );
 }
 
+async function uploadAttachment<T = Record<string, unknown>>(memoName: string) {
+  const formData = new FormData();
+  formData.set("memo", memoName);
+  formData.set(
+    "file",
+    new File(["payload"], "file.txt", {
+      type: "text/plain",
+    }),
+  );
+  return json<T>(
+    await fetchApp("http://flaremo.test/api/v1/attachments", {
+      method: "POST",
+      body: formData,
+    }),
+  );
+}
+
+/**
+ * Create a member through the admin API, activate the one-time reset link,
+ * and sign in. Returns the domain user id and the member's session cookie.
+ */
+async function createActivatedMember(email: string, name: string) {
+  const created = await json<{ id: string; activation_path: string }>(
+    await fetchApp("http://flaremo.test/api/app/admin/users", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name, email }),
+    }),
+  );
+  expect(created.id).toMatch(/^users\//);
+  const activationToken = new URL(
+    `http://flaremo.test${created.activation_path}`,
+  ).searchParams.get("token");
+  expect(activationToken).toBeTruthy();
+
+  const reset = await app.fetch(
+    new Request("http://flaremo.test/api/auth/reset-password", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin: "http://flaremo.test",
+      },
+      body: JSON.stringify({
+        token: activationToken,
+        newPassword: TEST_PASSWORD,
+      }),
+    }),
+    env,
+  );
+  expect(reset.status).toBe(200);
+
+  const signIn = await app.fetch(
+    new Request("http://flaremo.test/api/auth/sign-in/email", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin: "http://flaremo.test",
+      },
+      body: JSON.stringify({ email, password: TEST_PASSWORD }),
+    }),
+    env,
+  );
+  expect(signIn.status).toBe(200);
+  return { id: created.id, cookie: extractCookieHeader(signIn) };
+}
+
+async function createMemoAs(
+  cookie: string,
+  content: string,
+  visibility: "private" | "protected" | "public",
+) {
+  // The app DTO exposes the bare uuid as `id` and the row id as `name`.
+  const created = await json<{ id: string; name: string }>(
+    await app.fetch(
+      new Request("http://flaremo.test/api/app/memos", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          cookie,
+          origin: "http://flaremo.test",
+        },
+        body: JSON.stringify({ content, visibility }),
+      }),
+      env,
+    ),
+  );
+  expect(created.name).toMatch(/^memos\//);
+  expect(created.id).toBe(created.name.replace(/^memos\//, ""));
+  return created.id;
+}
+
 async function json<T = Record<string, unknown>>(response: Response) {
   expect(response.ok).toBe(true);
   return response.json() as Promise<T>;
-}
-
-async function applyMigration(db: D1Database, sql: string) {
-  const statements = sql
-    .split("--> statement-breakpoint")
-    .map((statement) => statement.trim())
-    .filter(Boolean);
-
-  for (const statement of statements) {
-    await db.prepare(statement).run();
-  }
 }

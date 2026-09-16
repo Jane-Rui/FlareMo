@@ -1,4 +1,4 @@
-import type { CreateMemoInput, MemoVisibility } from "@flaremo/contracts";
+import type { MemoVisibility } from "@flaremo/contracts";
 
 /**
  * The single composer uses this id. Consumers that expose multiple compose
@@ -17,6 +17,12 @@ export type MemoCaptureInput = {
   visibility: MemoVisibility;
   tags: string[];
   files: File[];
+  /**
+   * Attachments uploaded before their memo existed (inline image paste).
+   * `createMemoWithAttachments` binds them to the fresh memo right after
+   * creation; the list must survive queue persistence so a replay re-binds.
+   */
+  preuploadedAttachmentNames?: string[];
   /**
    * A client-generated id sent as `payload.client_id`. Keep it when an item is
    * retried so a future idempotent create endpoint can recognize the replay.
@@ -153,32 +159,15 @@ export function createMemoCaptureInput(
     visibility: input.visibility,
     tags: normalizeTags(input.tags),
     files: [...input.files],
+    ...(input.preuploadedAttachmentNames
+      ? { preuploadedAttachmentNames: [...input.preuploadedAttachmentNames] }
+      : {}),
     clientId: input.clientId ?? createMemoCaptureClientId(),
   };
 }
 
 export function isMemoCaptureEmpty(input: MemoCaptureInput) {
   return input.content.trim().length === 0 && input.files.length === 0;
-}
-
-/**
- * Builds the memo portion of a replay request. Attachments deliberately remain
- * separate because they are uploaded directly against the idempotent memo.
- */
-export function toCreateMemoInput(
-  input: MemoCaptureInput,
-  source = "web",
-): CreateMemoInput {
-  const capture = createMemoCaptureInput(input);
-  return {
-    content: capture.content,
-    visibility: capture.visibility,
-    payload: {
-      tags: capture.tags,
-      client_id: capture.clientId,
-    },
-    source,
-  };
 }
 
 /** Returns false instead of throwing when IndexedDB is disabled or unavailable. */
@@ -210,13 +199,6 @@ export async function restoreMemoDraft(
 ): Promise<MemoDraft | null> {
   const record = await getRecord<DraftRecord>(DRAFT_STORE, draftId);
   return record ? fromDraftRecord(record) : null;
-}
-
-export async function listMemoDrafts(): Promise<MemoDraft[]> {
-  const records = await getAllRecords<DraftRecord>(DRAFT_STORE);
-  return records
-    .map(fromDraftRecord)
-    .sort((left, right) => right.updatedAt - left.updatedAt);
 }
 
 /**
@@ -331,6 +313,11 @@ function toPersistedCapture(input: MemoCaptureInput): PersistedMemoCapture {
     content: capture.content,
     visibility: capture.visibility,
     tags: capture.tags,
+    ...(capture.preuploadedAttachmentNames
+      ? {
+          preuploadedAttachmentNames: [...capture.preuploadedAttachmentNames],
+        }
+      : {}),
     clientId: capture.clientId ?? createMemoCaptureClientId(),
     attachments: capture.files.map((file) => ({
       filename: file.name,
@@ -373,6 +360,9 @@ function fromPersistedCapture(record: PersistedMemoCapture): MemoCaptureInput {
     visibility: record.visibility,
     tags: [...record.tags],
     files: record.attachments.map(toFile),
+    ...(record.preuploadedAttachmentNames
+      ? { preuploadedAttachmentNames: [...record.preuploadedAttachmentNames] }
+      : {}),
     clientId: record.clientId,
   };
 }

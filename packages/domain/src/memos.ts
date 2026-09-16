@@ -11,7 +11,12 @@ import type { FlareMoDb, MemoPayload, MemoRow, UserRow } from "@flaremo/db";
 import { attachments, memoRevisions, memos, memoTags } from "@flaremo/db";
 import { and, asc, desc, eq, gt, gte, inArray, lt, or, sql } from "drizzle-orm";
 import { insertEmbeddingTask } from "./embedding-outbox";
-import { ConflictError, NotFoundError, ValidationError } from "./errors";
+import {
+  ConflictError,
+  ForbiddenError,
+  NotFoundError,
+  ValidationError,
+} from "./errors";
 import { createResourceId } from "./ids";
 import { compileMemoFilter } from "./memo-filter";
 import { insertMemosSseEvent } from "./memos-sse";
@@ -19,6 +24,12 @@ import { findMentionedUsers, insertMemoNotification } from "./memos-user";
 import { insertMemosWebhookEvent } from "./memos-webhooks";
 import { assertMemoCountQuota, type QuotaScope } from "./quotas";
 import { extractTags, normalizeMemoTags } from "./tags";
+import {
+  assertCanDeleteMemo,
+  assertCanEditMemo,
+  isActiveTeamMember,
+  memoReadScope,
+} from "./team-permissions";
 
 export type MemoListResult = {
   memos: MemoRow[];
@@ -32,23 +43,73 @@ type MemoCursor = {
   sortValue: string;
 };
 
+// The contracts schemas cap memo content at 100_000 characters for web/MCP
+// writes, but Memos-compatible writes (connect/social/REST) reach these
+// domain functions directly, so the same ceilings are enforced here. The
+// payload check lives in normalizeMemoPayload, the single point shared by
+// createMemo, updateMemo, and the import path.
+const MAX_MEMO_CONTENT_LENGTH = 100_000;
+const MAX_MEMO_PAYLOAD_JSON_LENGTH = 100_000;
+
+/**
+ * Candidate-row ceiling for CEL filters that cannot be fully translated to
+ * SQL. Starred higher than attachment filters because memo scans may include
+ * an unbounded visibility window; deployments on quota-sensitive plans can
+ * lower it via FLAREMO_MEMO_FILTER_SCAN_LIMIT.
+ */
+export const DEFAULT_MEMO_FILTER_SCAN_LIMIT = 5_000;
+
+/**
+ * Parse FLAREMO_MEMO_FILTER_SCAN_LIMIT. Values below the page-sized floor,
+ * above the hard cap of 50000, or non-integers fall back to the default.
+ */
+export function parseMemoFilterScanLimit(
+  value: string | undefined,
+): number | undefined {
+  if (!value) return undefined;
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || String(parsed) !== value.trim()) {
+    return undefined;
+  }
+  return parsed;
+}
+
+function assertMemoContentSize(content: string) {
+  if (content.length > MAX_MEMO_CONTENT_LENGTH) {
+    throw new ValidationError(
+      `Memo content exceeds the ${MAX_MEMO_CONTENT_LENGTH} character limit`,
+    );
+  }
+}
+
 export async function createMemo(
   db: FlareMoDb,
   user: UserRow,
   input: CreateMemoInput,
   scope?: QuotaScope,
 ): Promise<MemoRow> {
+  if (!isActiveTeamMember(user)) {
+    throw new ForbiddenError("Removed members cannot create memos.");
+  }
+  assertMemoContentSize(input.content);
   await assertMemoCountQuota(db, scope?.userLimits, user.id);
   const now = new Date().toISOString();
   const payload = normalizeMemoPayload(input.payload);
   const clientId = normalizeMemoClientId(payload.client_id);
   if (clientId) {
     payload.client_id = clientId;
-    const existing = await getMemoByClientId(db, user, clientId);
+    const existing = await getMemoByClientId(db, user.id, clientId);
     if (existing) return existing;
   }
   const tags = normalizeMemoTags(payload.tags ?? extractTags(input.content));
   payload.tags = tags;
+  // The task-list flags are domain truth, not client courtesy: recomputing
+  // keeps every write path (web, IM, agents) stamped even when the client
+  // sends no property at all.
+  payload.property = {
+    ...payload.property,
+    has_incomplete_tasks: hasUncheckedTaskList(input.content),
+  };
   const row = {
     id: createResourceId("memos"),
     userId: user.id,
@@ -127,7 +188,7 @@ export async function createMemo(
     // A second tab can submit the same queued entry at the same time. The
     // unique `(user_id, client_id)` index is the final idempotency boundary.
     if (clientId) {
-      const existing = await getMemoByClientId(db, user, clientId);
+      const existing = await getMemoByClientId(db, user.id, clientId);
       if (existing) return existing;
     }
     throw error;
@@ -139,19 +200,28 @@ export async function listMemos(
   db: FlareMoDb,
   user: UserRow,
   query: ListMemosQuery,
+  options: MemoFilterOptions = {},
 ): Promise<MemoListResult> {
-  return listMemosForViewer(db, user, query);
+  return listMemosForViewer(db, user, query, options);
 }
+
+/** Optional list-scanning knobs threaded from the worker's env. */
+export type MemoFilterOptions = {
+  /** Upper bound for candidate rows scanned for a not-fully-translatable CEL filter. */
+  celScanLimit?: number;
+};
 
 /**
  * List memos using the same visibility boundary as the Memos API. An
- * anonymous viewer is intentionally restricted to normal public memos; the
- * authenticated single-user path retains the existing owner-scoped behavior.
+ * anonymous viewer is intentionally restricted to normal public memos. Active
+ * members receive their own rows plus normal team/public rows, while team
+ * administrators may also manage non-private archived or trashed rows.
  */
 export async function listMemosForViewer(
   db: FlareMoDb,
   user: UserRow | null,
   query: ListMemosQuery,
+  options: MemoFilterOptions = {},
 ): Promise<MemoListResult> {
   const search = parseMemoSearchQuery(query.q);
   const celFilter = compileMemoFilter(query.filter);
@@ -162,9 +232,8 @@ export async function listMemosForViewer(
   const orderColumn = query.order_by.startsWith("updated_at")
     ? memos.updatedAt
     : memos.createdAt;
-  const filters = user
-    ? [eq(memos.userId, user.id)]
-    : [eq(memos.visibility, "public"), eq(memos.status, "normal")];
+  const filters = [memoReadScope(user)];
+  if (celFilter?.sqlPredicate) filters.push(celFilter.sqlPredicate);
 
   // The established `state` query parameter wins over a search scope so that
   // Memos-compatible clients retain their existing filtering semantics.
@@ -199,7 +268,6 @@ export async function listMemosForViewer(
       sql`EXISTS (
         SELECT 1 FROM ${attachments}
         WHERE ${attachments.memoId} = ${memos.id}
-          ${user ? sql`AND ${attachments.userId} = ${user.id}` : sql``}
           AND ${attachments.deletedAt} IS NULL
           AND ${attachments.state} = 'ready'
       )`,
@@ -231,7 +299,6 @@ export async function listMemosForViewer(
       sql`EXISTS (
         SELECT 1 FROM ${memoTags}
         WHERE ${memoTags.memoId} = ${memos.id}
-          ${user ? sql`AND ${memoTags.userId} = ${user.id}` : sql``}
           AND (
             ${memoTags.tag} = ${tag}
             OR ${memoTags.tag} LIKE ${`${escapedPrefix}%`} ESCAPE '\\'
@@ -245,7 +312,6 @@ export async function listMemosForViewer(
       sql`NOT EXISTS (
         SELECT 1 FROM ${memoTags}
         WHERE ${memoTags.memoId} = ${memos.id}
-          ${user ? sql`AND ${memoTags.userId} = ${user.id}` : sql``}
       )`,
     );
   }
@@ -277,9 +343,31 @@ export async function listMemosForViewer(
       direction === "asc" ? asc(orderColumn) : desc(orderColumn),
       direction === "asc" ? asc(memos.id) : desc(memos.id),
     );
-  const rows = celFilter
-    ? (await orderedQuery).filter((memo) => celFilter(memo, user))
-    : await orderedQuery.limit(query.page_size + 1);
+  // Never hydrate an unbounded candidate set for a user-supplied expression.
+  // If the bounded window contains a complete page plus a lookahead match,
+  // the existing cursor safely resumes after that page. Otherwise require a
+  // narrower query rather than silently claiming that a partial scan is final.
+  // A CEL filter that fully translates to SQL (checked by completeInSql) is
+  // evaluated by SQLite itself and needs neither the JS scan nor the limit.
+  const fullyPushedDown = celFilter?.completeInSql === true;
+  const scanLimit = options.celScanLimit ?? DEFAULT_MEMO_FILTER_SCAN_LIMIT;
+  const candidates = await orderedQuery.limit(
+    celFilter && !fullyPushedDown ? scanLimit + 1 : query.page_size + 1,
+  );
+  const rows =
+    celFilter && !fullyPushedDown
+      ? candidates.slice(0, scanLimit).filter((memo) => celFilter(memo, user))
+      : candidates;
+  if (
+    celFilter &&
+    !fullyPushedDown &&
+    candidates.length > scanLimit &&
+    rows.length <= query.page_size
+  ) {
+    throw new ValidationError(
+      `Filter scan limit reached (${scanLimit} memos). Narrow the query using a tag, date range, state, or visibility.`,
+    );
+  }
 
   const page = rows.slice(0, query.page_size);
   const next = rows.length > query.page_size ? page.at(-1) : undefined;
@@ -297,6 +385,50 @@ export async function listMemosForViewer(
         })
       : undefined,
   };
+}
+
+/**
+ * Team-wide per-user memo totals for the Memos ListAllUserStats RPC — the
+ * only fields its DTO consumes. Two grouped queries replace the per-user
+ * stat fan-out; users without memos are absent from the map and default to
+ * zero upstream. Counting semantics mirror getMemoStats (total excludes
+ * trashed).
+ */
+export async function listMemoTotalsByUser(db: FlareMoDb) {
+  const [countRows, tagRows] = await Promise.all([
+    db
+      .select({
+        userId: memos.userId,
+        total:
+          sql<number>`SUM(CASE WHEN ${memos.status} IN ('normal', 'archived') THEN 1 ELSE 0 END)`.mapWith(
+            Number,
+          ),
+      })
+      .from(memos)
+      .groupBy(memos.userId),
+    db
+      .select({
+        userId: memos.userId,
+        name: memoTags.tag,
+        count: sql<number>`COUNT(*)`.mapWith(Number),
+      })
+      .from(memoTags)
+      .innerJoin(memos, eq(memoTags.memoId, memos.id))
+      .where(inArray(memos.status, ["normal", "archived"]))
+      .groupBy(memos.userId, memoTags.tag),
+  ]);
+  const totals = new Map<
+    string,
+    { total: number; tags: Map<string, number> }
+  >();
+  for (const row of countRows) {
+    totals.set(row.userId, { total: row.total ?? 0, tags: new Map() });
+  }
+  for (const row of tagRows) {
+    const entry = totals.get(row.userId);
+    if (entry) entry.tags.set(row.name, row.count);
+  }
+  return totals;
 }
 
 export async function getMemoStats(
@@ -409,13 +541,7 @@ export async function getMemoByIdForViewer(
   id: string,
   options: { includeDeleted?: boolean } = {},
 ): Promise<MemoRow> {
-  const filters = user
-    ? [eq(memos.id, id), eq(memos.userId, user.id)]
-    : [
-        eq(memos.id, id),
-        eq(memos.visibility, "public"),
-        eq(memos.status, "normal"),
-      ];
+  const filters = [eq(memos.id, id), memoReadScope(user)];
   if (!options.includeDeleted) {
     filters.push(inArray(memos.status, ["normal", "archived", "trashed"]));
   }
@@ -435,13 +561,13 @@ export async function getMemoByIdForViewer(
 
 async function getMemoByClientId(
   db: FlareMoDb,
-  user: UserRow,
+  userId: string,
   clientId: string,
 ): Promise<MemoRow | undefined> {
   return db
     .select()
     .from(memos)
-    .where(and(eq(memos.userId, user.id), eq(memos.clientId, clientId)))
+    .where(and(eq(memos.userId, userId), eq(memos.clientId, clientId)))
     .get();
 }
 
@@ -452,6 +578,12 @@ export async function updateMemo(
   input: UpdateMemoInput,
 ): Promise<MemoRow> {
   const existing = await getMemoById(db, user, id, { includeDeleted: true });
+  assertCanEditMemo(user, existing);
+  // Only the incoming content is re-validated; content inherited from the
+  // persisted row is left untouched so legacy oversized rows stay updatable.
+  if (input.content !== undefined) {
+    assertMemoContentSize(input.content);
+  }
   const now = new Date().toISOString();
   const status = input.status;
   const metadataChanged =
@@ -472,7 +604,7 @@ export async function updateMemo(
   // idempotency key is not silently dropped.
   const nextClientId = requestedClientId ?? persistedClientId;
   if (nextClientId && nextClientId !== existing.clientId) {
-    const owner = await getMemoByClientId(db, user, nextClientId);
+    const owner = await getMemoByClientId(db, existing.userId, nextClientId);
     if (owner && owner.id !== existing.id) {
       throw new ConflictError("Memo client_id is already in use");
     }
@@ -483,7 +615,13 @@ export async function updateMemo(
   const tags = metadataChanged
     ? normalizeMemoTags(nextPayload.tags ?? extractTags(nextContent))
     : [];
-  if (metadataChanged) nextPayload.tags = tags;
+  if (metadataChanged) {
+    nextPayload.tags = tags;
+    nextPayload.property = {
+      ...nextPayload.property,
+      has_incomplete_tasks: hasUncheckedTaskList(nextContent),
+    };
+  }
 
   const shouldCreateRevision =
     input.content !== undefined ||
@@ -509,7 +647,7 @@ export async function updateMemo(
           : existing.deletedAt,
   };
   const webhookEventStatement = insertMemosWebhookEvent(db, {
-    receiverId: user.id,
+    receiverId: existing.userId,
     activityType:
       status === "deleted" ? "memos.memo.deleted" : "memos.memo.updated",
     creator: user,
@@ -548,7 +686,7 @@ export async function updateMemo(
     type: status === "deleted" ? "memo.deleted" : "memo.updated",
     name: existing.id,
     visibility: input.visibility ?? existing.visibility,
-    creatorId: user.id,
+    creatorId: existing.userId,
     createdAt: now,
   });
 
@@ -558,7 +696,7 @@ export async function updateMemo(
   const embeddingTaskStatement =
     input.content !== undefined || input.status !== undefined
       ? insertEmbeddingTask(db, {
-          userId: user.id,
+          userId: existing.userId,
           resourceType: "memo",
           resourceId: existing.id,
           operation: "reindex",
@@ -569,11 +707,11 @@ export async function updateMemo(
   const updateStatement = db
     .update(memos)
     .set(patch)
-    .where(and(eq(memos.id, id), eq(memos.userId, user.id)));
+    .where(and(eq(memos.id, id), eq(memos.userId, existing.userId)));
   const revisionStatement = db.insert(memoRevisions).values({
     id: revisionId ?? createResourceId("revisions"),
     memoId: existing.id,
-    userId: user.id,
+    userId: existing.userId,
     content: existing.content,
     visibility: existing.visibility,
     payload: existing.payload,
@@ -581,7 +719,7 @@ export async function updateMemo(
   });
   const deleteTagsStatement = db
     .delete(memoTags)
-    .where(and(eq(memoTags.memoId, id), eq(memoTags.userId, user.id)));
+    .where(and(eq(memoTags.memoId, id), eq(memoTags.userId, existing.userId)));
   if (metadataChanged && tags.length > 0 && shouldCreateRevision) {
     await db.batch([
       revisionStatement,
@@ -590,7 +728,7 @@ export async function updateMemo(
       db.insert(memoTags).values(
         tags.map((tag) => ({
           memoId: id,
-          userId: user.id,
+          userId: existing.userId,
           tag,
           createdAt: now,
         })),
@@ -632,6 +770,23 @@ export async function updateMemo(
   return getMemoById(db, user, id, { includeDeleted: true });
 }
 
+/**
+ * Recycle-bin TTL sweep candidates: trashed memos whose `deletedAt` fell
+ * behind the retention cutoff. Trash purging hard-deletes these together
+ * with their attachment binaries (see the worker's scheduled maintenance).
+ */
+export async function listExpiredTrashedMemos(
+  db: FlareMoDb,
+  cutoff: string,
+  limit = 200,
+) {
+  return db
+    .select({ id: memos.id, userId: memos.userId })
+    .from(memos)
+    .where(and(eq(memos.status, "trashed"), lt(memos.deletedAt, cutoff)))
+    .limit(limit);
+}
+
 export async function moveMemoToTrash(
   db: FlareMoDb,
   user: UserRow,
@@ -646,36 +801,44 @@ export async function hardDeleteMemo(
   id: string,
 ): Promise<void> {
   const existing = await getMemoById(db, user, id, { includeDeleted: true });
+  assertCanDeleteMemo(user, existing);
   const now = new Date().toISOString();
   const eventStatement = insertMemosSseEvent(db, {
     type: "memo.deleted",
     name: existing.id,
     visibility: existing.visibility,
-    creatorId: user.id,
+    creatorId: existing.userId,
     createdAt: now,
   });
   const webhookEventStatement = insertMemosWebhookEvent(db, {
-    receiverId: user.id,
+    receiverId: existing.userId,
     activityType: "memos.memo.deleted",
     creator: user,
     memo: existing,
     createdAt: now,
   });
   const embeddingTaskStatement = insertEmbeddingTask(db, {
-    userId: user.id,
+    userId: existing.userId,
     resourceType: "memo",
     resourceId: existing.id,
     operation: "delete",
     createdAt: now,
   });
+  // Attachment rows are only marked `deleting`, never dropped here: the daily
+  // GC removes the binary from R2 and then deletes the rows. This way even a
+  // hard-delete path that skips `markMemoAttachmentsDeleting` cannot orphan
+  // the object — the rows let the cron predicate find it forever.
   await db.batch([
     db
-      .delete(attachments)
-      .where(and(eq(attachments.memoId, id), eq(attachments.userId, user.id))),
+      .update(attachments)
+      .set({ state: "deleting", updatedAt: now })
+      .where(eq(attachments.memoId, id)),
     eventStatement,
     webhookEventStatement,
     embeddingTaskStatement,
-    db.delete(memos).where(and(eq(memos.id, id), eq(memos.userId, user.id))),
+    db
+      .delete(memos)
+      .where(and(eq(memos.id, id), eq(memos.userId, existing.userId))),
   ]);
 }
 
@@ -723,13 +886,25 @@ export function normalizeMemoPayload(payload: unknown): MemoPayload {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     return {};
   }
-  return { ...(payload as MemoPayload) };
+  const normalized = { ...(payload as MemoPayload) };
+  if (JSON.stringify(normalized).length > MAX_MEMO_PAYLOAD_JSON_LENGTH) {
+    throw new ValidationError(
+      `Memo payload exceeds the ${MAX_MEMO_PAYLOAD_JSON_LENGTH} character limit`,
+    );
+  }
+  return normalized;
 }
 
 export function normalizeMemoClientId(value: unknown) {
   if (typeof value !== "string") return undefined;
   const clientId = value.trim();
   return clientId && clientId.length <= 128 ? clientId : undefined;
+}
+
+// Unchecked item of a Markdown task list: `- [ ]`, `* [ ]`, `+ [ ]` or an
+// ordered `1. [ ]` variant, at the start of a line.
+export function hasUncheckedTaskList(content: string): boolean {
+  return /(?:^|\n)[ \t]*(?:[-*+]|\d+[.)])[ \t]+\[ \]/.test(content);
 }
 
 function encodePageToken(value: MemoCursor) {

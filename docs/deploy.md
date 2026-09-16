@@ -2,32 +2,7 @@
 
 FlareMo 部署到 Cloudflare Workers。Worker 同时承载前端静态资源和 API，D1 保存主数据，R2 保存附件。
 
-## 一键部署
-
-点击按钮会让 Cloudflare 从当前仓库创建一份新仓库，读取 `wrangler.jsonc`，自动创建需要的 D1 和 R2 资源，并配置 Workers Builds。把 `FLAREMO_DEPLOY_REPOSITORY` 填成这个新仓库的 `owner/repository`，应用内的系统更新入口就能打开对应 workflow。
-
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/realchendahuang/FlareMo)
-
-公开入口的实测记录见 [deploy-button-test.md](./deploy-button-test.md)。
-
-如果 Cloudflare Dashboard 还没有连接 GitHub 或 GitLab provider，创建页会先提示 `Connect a Git account to continue.`。这是 Cloudflare Workers Builds 的 Git 集成前置条件。
-
-如果已有 GitHub 连接已经过期，Cloudflare 会在设置仓库时返回类似：
-
-```text
-HTTP 400
-Your GitHub authorization has expired. Please reauthorize your GitHub connection by reinstalling the Cloudflare GitHub App.
-```
-
-这时按顺序操作：先在 GitHub 卸载旧的 `Cloudflare Workers and Pages` App，再回到 Deploy Button 表单选择 `新建 GitHub 连接`，最后在带 Cloudflare `state` 参数的 GitHub 页面选择 `Install & Authorize`。不要先从 GitHub App 页面直接安装；无 `state` 的安装不会建立当前 Cloudflare 表单所需的 Git 账号连接。GitHub 可能要求 sudo/passkey、GitHub Mobile、authenticator app 或邮箱验证码；这是 GitHub 账号侧的安全验证，不是 FlareMo 代码问题。
-
-一键部署完成后还要做一件事：
-
-- 在 `wrangler.jsonc` 设置 `FLAREMO_PUBLIC_URL`，并配置 Better Auth 的两个 Worker secret。
-- 按下面的 bootstrap 流程创建唯一初始账户，再验证 cookie session 和 `memos_pat_` PAT。
-- 迁移期可以继续在 Cloudflare Access 后面运行；是否移除 Access 必须等原生认证和客户端回归完成后单独决定。
-
-Deploy Button 使用的 `pnpm deploy` 会自动应用尚未执行的 D1 migrations。测试 Deploy Button 时仍要确认生成仓库里的 `wrangler.jsonc` 指向新建的测试 D1，而不是已有生产库。
+部署是**手动操作**：仓库不跟踪 `wrangler.jsonc`，项目没有一键部署按钮，也没有 CI 或自动部署。先创建资源、复制配置模板并填入自己的值，再执行部署命令。
 
 ## 手动部署
 
@@ -37,14 +12,15 @@ Deploy Button 使用的 `pnpm deploy` 会自动应用尚未执行的 D1 migratio
 pnpm install
 ```
 
-创建 D1 和 R2：
+复制配置模板并创建 D1 和 R2：
 
 ```bash
+cp wrangler.jsonc.example wrangler.jsonc
 pnpm exec wrangler d1 create flaremo
 pnpm exec wrangler r2 bucket create flaremo-attachments
 ```
 
-把 D1 输出的 `database_id` 写到 `wrangler.jsonc`。
+`wrangler.jsonc.example` 里的账号相关值需要替换：把 D1 输出的 `database_id` 写入 `wrangler.jsonc`，并把 `FLAREMO_PUBLIC_URL` 设置为你的公开访问 origin；bucket、queue 和 Vectorize index 名称可以保留为建议默认值。
 
 部署；这个命令会先构建前端、应用远端 migrations，再发布 Worker：
 
@@ -57,7 +33,17 @@ pnpm deploy
 ```bash
 pnpm verify
 pnpm deploy:dry-run
+pnpm deploy:preflight
 ```
+
+`pnpm deploy:preflight` 会确认本地发布环境提供了至少 32 个字符的
+`BETTER_AUTH_SECRET`，并拒绝常见占位值。在 CI 构建环境（`CI=true`，如
+Workers Builds）中 preflight 只降级为警告不阻断：
+自动部署环境不携带操作者 secrets，正式 secret 存放在 Worker 的 secret
+store，首次部署后由部署者用 `wrangler secret put` 配置。本地手动发布仍
+强制校验。生产发布还必须确认
+`flaremo-member-removal` Queue 已在目标 Cloudflare 账户创建；`pnpm deploy:dry-run`
+会显示该 Queue、D1、R2、Vectorize、AI 和 Assets binding，但不会创建远程资源。
 
 ## Better Auth 原生认证
 
@@ -114,6 +100,10 @@ pnpm migrate:remote
 curl "$FLAREMO_URL/api/auth/flaremo/bootstrap/status"
 ```
 
+0016 migration 会创建 `member_removal_jobs`。应用后再检查管理员页的成员移除任务，
+并确认 Queue 消费者可以领取 queued job；迁移前的旧数据库只保留兼容 fallback，不能
+作为正式环境的最终状态。
+
 首次安装应看到 `state: "ready"` 和 `setup_available: true`。如果返回 `recovery_required`，不要重复提交 bootstrap 或手工创建第二个账户；这表示身份创建和 domain owner 映射之间发生了部分失败，需要先按维护流程处理 bootstrap recovery。
 
 ### 5. 一次性创建 owner（生产主路径：`/setup` 页面）
@@ -122,7 +112,7 @@ curl "$FLAREMO_URL/api/auth/flaremo/bootstrap/status"
 
 - Worker secret `FLAREMO_BOOTSTRAP_SECRET`。
 - 初始 Better Auth 用户名、显示名和邮箱。
-- 初始密码（12–128 个字符）。
+- 初始密码（8–128 个字符）。
 
 如果生产实例启用了 Cloudflare Access，先通过 Access 外层 policy 再打开 `/setup`。整个输入过程应只发生在 HTTPS 页面和部署者自己的密码管理器中；不要把 secret、密码或完整表单内容放入 shell 命令、shell history、Agent 输出、issue、日志或聊天。提交成功后页面会转到 `/login`，公共 signup 关闭；之后在账户页面修改密码或撤销其他 session。
 

@@ -1,6 +1,8 @@
 import { LanguagesIcon } from "lucide-react";
 import type { ReactNode } from "react";
+import { useBranding } from "@/branding";
 import { FlareMoLogo } from "@/components/flaremo-logo";
+import { InfoTip } from "@/components/info-tip";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -23,6 +25,7 @@ export function AuthPageFrame({
   title: string;
 }) {
   const { t, toggleLocale } = useI18n();
+  const { product, markLightUrl, markDarkUrl } = useBranding();
 
   return (
     <main className="grid min-h-svh lg:grid-cols-2">
@@ -39,11 +42,18 @@ export function AuthPageFrame({
             alt=""
             aria-hidden="true"
             className="size-8"
-            src="/brand/flaremo-mark-dark-320.png"
+            src={
+              markDarkUrl ?? markLightUrl ?? "/brand/flaremo-mark-dark-320.png"
+            }
           />
           <span className="font-heading text-lg font-semibold tracking-tight text-flame-50">
-            FlareMo
+            {product}
           </span>
+        </div>
+        <div className="relative max-w-md py-16">
+          <h1 className="max-w-sm font-heading text-4xl font-semibold leading-tight tracking-tight text-flame-50 xl:text-5xl">
+            {t("auth.brandTitle")}
+          </h1>
         </div>
       </aside>
       <div className="relative flex items-center justify-center bg-[radial-gradient(circle_at_top,_var(--color-flame-100),_transparent_42%)] px-4 py-8 dark:bg-[radial-gradient(circle_at_top,_color-mix(in_oklab,var(--color-flame-400)_15%,transparent),_transparent_42%)]">
@@ -71,7 +81,10 @@ export function AuthPageFrame({
             ) : null}
             <CardTitle className="text-xl">{title}</CardTitle>
             {description ? (
-              <CardDescription>{description}</CardDescription>
+              <CardDescription className="flex items-start gap-1.5">
+                <InfoTip text={description} />
+                <span className="sr-only">{description}</span>
+              </CardDescription>
             ) : null}
           </CardHeader>
           <CardContent>{children}</CardContent>
@@ -79,17 +92,4 @@ export function AuthPageFrame({
       </div>
     </main>
   );
-}
-
-export function errorMessage(error: unknown, fallback: string) {
-  if (
-    error &&
-    typeof error === "object" &&
-    "message" in error &&
-    typeof error.message === "string" &&
-    error.message.trim()
-  ) {
-    return error.message;
-  }
-  return fallback;
 }

@@ -2,12 +2,13 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Navigate, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { bootstrapOwner, getBootstrapStatus } from "@/api";
-import { AuthPageFrame, errorMessage } from "@/components/auth-page-frame";
+import { AuthPageFrame } from "@/components/auth-page-frame";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useI18n } from "@/i18n";
+import { errorMessage } from "@/lib/error";
 
-const MIN_PASSWORD_LENGTH = 12;
+const MIN_PASSWORD_LENGTH = 8;
 
 export function SetupPage() {
   const { t } = useI18n();

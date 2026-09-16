@@ -42,6 +42,27 @@ FlareMo 以 Memos 作为生态锚点，但不复制 Memos 的内部实现。
 
 FlareMo 的实际目标不是“能导入 Memos 数据的普通笔记 App”，而是“Cloudflare-native 的 Memos-compatible 个人知识系统”。
 
+## 产品定位与兼容边界
+
+FlareMo 的产品目标是 **AI native 的个人知识管理**：一个人用是安静的私人笔记，一个团队用是共享知识库，语义检索、AI 记忆、Agent 读写是产品的原生部分而不是外挂。这与 Memos 的目标不同，因此 **FlareMo 不以「完全兼容 Memos」为目标**。
+
+Memos 在这里的角色是**生态底座**，不是要复刻的对象：
+
+- **兼容是手段，不是目标。** 复用 Memos 的领域模型、资源命名、`/api/v1` 协议、OpenAPI、导入导出和 MCP 方向，是为了直接接上它的客户端、脚本和周边工具生态，少走弯路。
+- **允许并预期超出上游。** Agent Memory、语义检索与「找一找」、项目与任务、音频文稿阅读等能力在 Memos 中没有对应物，属 FlareMo 原生面（`/api/app/*`），由 FlareMo 自己的需求定义，不受上游形态约束。`AIService.Transcribe` 等上游接口在 FlareMo 明确返回 `501`，也说明 AI 是 FlareMo 的独立赛道而非兼容目标。
+- **上游能力按需兼容。** 只在我们需要、且语义说得通的时候接入，不为了对齐而实现无业务价值的上游资源。
+- **与上游分叉是预期结果。** 底座借它的形，路自己走；兼容面不构成产品演进的约束。
+
+### 兼容面的工程纪律
+
+`/api/v1/*` 的**既有字段形状与语义是第三方客户端的契约**，由 `memos-compatibility.test.ts`、`memos-transport.test.ts` 等测试锁定。第三方客户端按上游行为编写、不会阅读 FlareMo 文档，因此：
+
+- **只做加法，不改形状。** 新增字段不会破坏兼容（客户端忽略未知字段）；但改动既有字段的语义或类型会让第三方客户端静默出错。
+- **新能力优先落在原生面。** FlareMo 独有能力走 `/api/app/*`（如 branding、account、admin、memory、projects、tasks 已是先例）。
+- **memo payload 是可自由扩展的通道。** `memoPayloadSchema` 为 `.passthrough()`，新增键零 migration、零兼容风险，适合需要随 memo 一起读写、又不想动 `/api/v1` 响应形状的扩展。
+
+这条纪律的目的不是限制演进，而是保证「复用上游生态」与「自行扩展」两条路互不干扰。
+
 ## 参考项目定位
 
 ### Memos
@@ -424,25 +445,25 @@ AI 工作流围绕个人知识库展开：
 
 ## 组装入口与计划限额
 
-worker 的路由表不再挂在模块级常量上，而是由 `createFlareMoApp(options)` 工厂构建：每次调用返回全新 Hono 实例，default 导出的 `ExportedHandler` 只是该工厂的默认消费者。外部组合壳（未来 FlareMo 托管形态的私有入口）可以 import 同一工厂，追加自己的中间件与路由，不必复制或 patch 内核。
+worker 的路由表不再挂在模块级常量上，而是由 `createFlareMoApp(options)` 工厂构建：每次调用返回全新 Hono 实例。生产 default export 和外部共享部署应使用 `createFlareMoWorker(options)`：它在同一组注入限额下组合 HTTP 路由、请求后的 webhook/embedding outbox 与 Cron maintenance。`createFlareMoApp` 保留给测试或需要挂载额外路由的高级场景；外部组合壳不能只包一层 `fetch`，否则会悄悄跳过 durable work。
 
 计划限额以注入数据的形式进入请求上下文，而不是散落的条件分支：
 
 - domain 层的 `PlanLimits` 只包含「数字或 null」的字段；`SELF_HOST_UNLIMITED` 是自部署恒定值。domain 不知道订阅概念的存在。
 - `createFlareMoApp` 接受可选的 `resolvePlanLimits(env)`；默认实现恒返回 `SELF_HOST_UNLIMITED`，解析结果经每个请求首个中间件写入 Hono Variables（`planLimits`），`getRequestContext` 系列将其放入返回值的 `limits` 字段。
 - 超限场景使用 `QuotaExceededError`（HTTP 429），走既有 `DomainError` 映射。
-- 本仓库不实现任何订阅解析器；云端 resolver 属于私有控制面的注入物。
+- 本仓库不实现任何订阅解析器；云端 resolver 属于外部组合壳的注入物。
 
 限额不只是被注入，还在内核的四个执行点被真正执行（`packages/domain/src/quotas.ts`）：
 
 1. **附件存储总量**：三条上传路径与两条导入路径在写入 R2 前调用 `assertAttachmentStorageQuota`（对 `attachments` 表 `state='ready'` 求和，部署级）。
-2. **月度 embedding tokens**：outbox 每次 embed 成功后按 `estimateTokenCount`（`ceil(chars/4)` 估算）写入 `usage_counters`；预算耗尽时 sweep 暂停认领（任务保持 pending、不消耗重试次数，次月自动恢复）。全量重建只计量不阻断（恢复路径）。`dispatchEmbeddingOutbox` 的 `limits` 来自调用方——default handler 传 `SELF_HOST_UNLIMITED`，托管壳可在自己的 scheduled 入口注入真实限额。
+2. **月度 embedding tokens**：outbox 每次 embed 成功后按 `estimateTokenCount`（`ceil(chars/4)` 估算）写入 `usage_counters`；预算耗尽时 sweep 暂停认领（任务保持 pending、不消耗重试次数，次月自动恢复）。全量重建只计量不阻断（恢复路径）。`dispatchEmbeddingOutbox` 的 `limits` 来自调用方——default handler 传 `SELF_HOST_UNLIMITED`，外部组合壳可在自己的 scheduled 入口注入真实限额。
 3. **月度语义搜索次数**：`/api/app/search/semantic` 与 `memory_recall` 语义路径在 embed 前检查 `search_queries` 月度计数（部署级求和），超限抛 429；成功后计入 `search_queries` 与查询 token 估算。
 4. **成员数上限**：`createFlaremoMemberWithLink` 接受可选 `limits`，Web 注册 / 管理员建号 / Memos 注册路径统一预检（注册路径在 Better Auth 身份创建**之前**预检，避免超限时产生孤儿身份）；`ensureSingleUser` bootstrap 永不受限。
 
 `/api/app/usage/vector` 响应附带 `plan`（`PlanUsageReport`：四维度的 used/limit），前端用量面板据此渲染限额进度条；limit 为 null（自托管）的行不渲染。限额为 null 时所有检查旁路，自托管行为零变化。
 
-**Per-user 限额（共享 SaaS 实例）**：部署级限额对「公开注册、多用户共享一个部署」的形态会锁死全体，因此内核还接受一层 per-user 限额（`UserPlanLimits`，只有存储/tokens/搜索三个维度——成员数天然是部署级，不做 per-user 形态）。注入途径：`createFlareMoApp` 的 `resolveUserPlanLimits(env, userId)` 选项，或 `FLAREMO_USER_LIMITS_JSON` 环境变量（用户无关的静态配置）。生效优先级 per-user → 部署级 → 不限量；per-user 生效时用量按该 user 读取（`usage_counters` 本就按 user 分桶，附件存储按 userId 过滤求和），outbox 也按任务归属用户判断预算。`plan` 响应在配置了 per-user 限额时附带 `user` 段，面板渲染「个人限额」分组。
+**Per-user 限额（共享多用户实例）**：部署级限额对「公开注册、多用户共享一个部署」的形态会锁死全体，因此内核还接受一层 per-user 限额（`UserPlanLimits`，只有存储/tokens/搜索三个维度——成员数天然是部署级，不做 per-user 形态）。注入途径：`createFlareMoApp` 的 `resolveUserPlanLimits(env, userId)` 选项，或 `FLAREMO_USER_LIMITS_JSON` 环境变量（用户无关的静态配置）。生效优先级 per-user → 部署级 → 不限量；per-user 生效时用量按该 user 读取（`usage_counters` 本就按 user 分桶，附件存储按 userId 过滤求和），outbox 也按任务归属用户判断预算。`plan` 响应在配置了 per-user 限额时附带 `user` 段，面板渲染「个人限额」分组。
 
 **存量条数维度**：`UserPlanLimits` 另有 `maxMemosPerUser` / `maxMemoryItemsPerUser`（共享实例按条计费的主货币）。条数是存量口径——memo 按 `normal + archived` 计（回收站不算），memory 按 `active + archived` 计。检查在 domain `createMemo` / `createMemory` 内部执行（可选 `scope` 参数沿调用链透传），导入路径以 bundle 条数预检；`additionalCount` 默认 1 表示「一次写入即将发生」，恰好满额允许、超出才 429。Projects/Tasks/引用关系/回顾/导入导出/MCP 接入是零边际成本能力，**不设限**。
 
@@ -453,3 +474,7 @@ FlareMo 的架构核心是：
 **面向 Memos 生态的兼容 API + Better Auth + FlareMo-native internal model + Cloudflare Workers runtime + D1/Drizzle source of truth。**
 
 对外吃 Memos 生态，对内保持干净，不复制 Memos 的历史包袱，也不为了凑技术栈而引入 Cloudflare 全家桶。
+
+## 主动语音记录
+
+Capture 复用 realtime-context 的浏览器 PCM / 流式 ASR 思路，将服务端适配移入 FlareMo Worker。浏览器以 Better Auth cookie 连接同源 `/api/app/capture/ws`，Worker 校验 Origin、持有腾讯云或 DashScope 凭据并转换事件。录音过程中的文字进入现有 IndexedDB 草稿；停止并确认后调用现有 Memo API，继续使用 D1、FTS 与可选 embedding pipeline。不新增语音数据库、第二套认证或 Python 服务。详细生命周期、音频处理和验收边界见 [Capture 设计](voice-capture-design.md)。
