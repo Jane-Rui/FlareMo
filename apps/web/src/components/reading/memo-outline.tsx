@@ -1,5 +1,5 @@
+import { Collapsible } from "@base-ui/react/collapsible";
 import { ChevronDownIcon } from "lucide-react";
-import { Collapsible } from "radix-ui";
 import { useEffect, useMemo, useState } from "react";
 import { useI18n } from "@/i18n";
 import { extractOutline } from "@/lib/markdown-outline";
@@ -49,7 +49,7 @@ export function MemoOutline({
               entry.depth > 2 && "pl-5",
               entry.depth === 2 && "pl-3.5",
               activeId === entry.id
-                ? "bg-flame-50 font-medium text-flame-700 dark:bg-flame-400/12 dark:text-flame-200"
+                ? "bg-brand-50 text-brand-700 dark:bg-brand-400/12 dark:text-brand-200"
                 : "text-muted-foreground",
             )}
             href={`#${entry.id}`}
@@ -74,9 +74,9 @@ export function MemoOutline({
       <Collapsible.Root className={cn("lg:hidden", className)}>
         <Collapsible.Trigger className="flex w-full items-center justify-between rounded-lg border border-border/60 px-3 py-2 text-xs font-medium text-muted-foreground">
           {t("reading.outline")}
-          <ChevronDownIcon className="size-3.5 transition-transform data-[state=open]:rotate-180" />
+          <ChevronDownIcon className="size-3.5 transition-transform data-open:rotate-180" />
         </Collapsible.Trigger>
-        <Collapsible.Content className="pt-2">{list}</Collapsible.Content>
+        <Collapsible.Panel className="pt-2">{list}</Collapsible.Panel>
       </Collapsible.Root>
 
       <nav

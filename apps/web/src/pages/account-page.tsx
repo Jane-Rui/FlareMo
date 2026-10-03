@@ -1,402 +1,402 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+/**
+ * The settings dialog shell: the modal's frame (mobile master/detail and the
+ * desktop split view) and the two exported entry points. Section state and
+ * query orchestration live in `account/use-account-page-state`, the nav
+ * table in `account/settings-nav`, the section bodies in
+ * `account/settings-section-content`, and the server writes in
+ * `account/use-account-settings-mutations`.
+ */
+
 import { useNavigate } from "@tanstack/react-router";
-import { LogOutIcon } from "lucide-react";
-import { useEffect, useState } from "react";
-import { toast } from "sonner";
 import {
-  changeEmail,
-  createExportTask,
-  createPersonalAccessToken,
-  deleteAccount,
-  getCurrentFlareMoUser,
-  getVectorUsage,
-  listDataTasks,
-  listPersonalAccessTokens,
-  revokePersonalAccessToken,
-} from "@/api";
-import { authClient } from "@/auth-client";
-import { SubpageHeader } from "@/components/subpage-header";
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  LogOutIcon,
+  XIcon,
+} from "lucide-react";
+import { Avatar } from "@/components/ui/avatar";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { useI18n } from "@/i18n";
-import { errorMessage } from "@/lib/error";
-import { InstallAppCard } from "./account/install-app-card";
-import { ProfilePanel } from "./account/profile-panel";
-import { MIN_PASSWORD_LENGTH, SecurityPanel } from "./account/security-panel";
-import { TokensPanel } from "./account/tokens-panel";
-import { TransferPanel } from "./account/transfer-panel";
-import { UsagePanel } from "./account/usage-panel";
-import { AdminPanel, BrandingCard } from "./admin-page";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import { TIMELINE_SEARCH } from "@/lib/timeline-search";
+import { cn } from "@/lib/utils";
+import { SettingsRow, SettingsSectionGroup } from "./account/apple-settings-ui";
+import {
+  roleLabel,
+  SettingsSectionContent,
+} from "./account/settings-section-content";
+import { useAccountPageState } from "./account/use-account-page-state";
 
-type AccountTab = "account" | "usage" | "branding" | "admin";
-
-export function AccountPage() {
-  const { locale, t } = useI18n();
-  const navigate = useNavigate({ from: "/account" });
-  const queryClient = useQueryClient();
-  const session = authClient.useSession();
-  const [tab, setTab] = useState<AccountTab>("account");
-  const [username, setUsername] = useState("");
-  const [currentPassword, setCurrentPassword] = useState("");
-  const [newPassword, setNewPassword] = useState("");
-  const [newPasswordConfirmation, setNewPasswordConfirmation] = useState("");
-  const [newEmail, setNewEmail] = useState("");
-  const [emailCurrentPassword, setEmailCurrentPassword] = useState("");
-  const [tokenName, setTokenName] = useState("");
-  const [tokenExpiryDays, setTokenExpiryDays] = useState("");
-  const [createdToken, setCreatedToken] = useState<string | null>(null);
-  const [accountError, setAccountError] = useState<string | null>(null);
-  const [passwordError, setPasswordError] = useState<string | null>(null);
-  const [emailError, setEmailError] = useState<string | null>(null);
-  const [emailVerificationPending, setEmailVerificationPending] =
-    useState(false);
-  const [deletePassword, setDeletePassword] = useState("");
-  const [deleteError, setDeleteError] = useState<string | null>(null);
-  const deleteAccountMutation = useMutation({
-    mutationFn: deleteAccount,
-    onSuccess: async () => {
-      // The server deleted the account; every cached query is stale.
-      queryClient.clear();
-      await authClient.signOut().catch(() => undefined);
-      await navigate({ replace: true, to: "/login" });
-    },
-  });
-  const [tokenError, setTokenError] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
-
-  useEffect(() => {
-    if (session.data?.user.username) {
-      setUsername(session.data.user.username);
-    }
-  }, [session.data?.user.username]);
-
-  const tokensQuery = useQuery({
-    queryKey: ["personal-access-tokens"],
-    queryFn: listPersonalAccessTokens,
-    retry: false,
-  });
-  const meQuery = useQuery({
-    queryKey: ["current-flaremo-user"],
-    queryFn: getCurrentFlareMoUser,
-    retry: false,
-  });
-  const vectorUsageQuery = useQuery({
-    queryKey: ["vector-usage"],
-    queryFn: getVectorUsage,
-    retry: false,
-  });
-  const dataTasksQuery = useQuery({
-    queryKey: ["data-tasks"],
-    queryFn: listDataTasks,
-    retry: false,
-    refetchInterval: (query) => {
-      const tasks = query.state.data?.tasks ?? [];
-      return tasks.some(
-        (task) => task.status === "queued" || task.status === "running",
-      )
-        ? 5_000
-        : false;
-    },
-  });
-  const retryExportMutation = useMutation({
-    mutationFn: createExportTask,
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["data-tasks"] });
-    },
-    onError: (error) =>
-      toast.error(errorMessage(error, t("transfer.retryFailed"))),
-  });
-  const updateUsernameMutation = useMutation({
-    mutationFn: async (nextUsername: string) => {
-      const result = await authClient.updateUser({ username: nextUsername });
-      if (result.error) throw result.error;
-    },
-    onSuccess: async () => {
-      await session.refetch();
-    },
-  });
-  const changePasswordMutation = useMutation({
-    mutationFn: async (input: {
-      currentPassword: string;
-      newPassword: string;
-    }) => {
-      const result = await authClient.changePassword({
-        currentPassword: input.currentPassword,
-        newPassword: input.newPassword,
-        revokeOtherSessions: true,
-      });
-      if (result.error) throw result.error;
-    },
-  });
-  const changeEmailMutation = useMutation({
-    mutationFn: changeEmail,
-    onSuccess: async (result) => {
-      // With an email provider configured the change is only staged: the new
-      // address must confirm ownership before the login identity switches.
-      setEmailVerificationPending(result.verification_sent === true);
-      await session.refetch();
-    },
-  });
-  const createTokenMutation = useMutation({
-    mutationFn: createPersonalAccessToken,
-    onSuccess: async (result) => {
-      setCreatedToken(result.token);
-      setCopied(false);
-      setTokenName("");
-      setTokenExpiryDays("");
-      await queryClient.invalidateQueries({
-        queryKey: ["personal-access-tokens"],
-      });
-    },
-  });
-  const revokeTokenMutation = useMutation({
-    mutationFn: revokePersonalAccessToken,
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({
-        queryKey: ["personal-access-tokens"],
-      });
-    },
-  });
-
-  const handleUsernameSubmit = async () => {
-    setAccountError(null);
-    try {
-      await updateUsernameMutation.mutateAsync(username.trim());
-    } catch (error) {
-      setAccountError(errorMessage(error, t("auth.usernameUpdateFailed")));
-    }
-  };
-
-  const handlePasswordSubmit = async () => {
-    if (newPassword.length < MIN_PASSWORD_LENGTH) {
-      setPasswordError(t("auth.passwordLength"));
-      return;
-    }
-    if (newPassword !== newPasswordConfirmation) {
-      setPasswordError(t("auth.passwordMismatch"));
-      return;
-    }
-    setPasswordError(null);
-    try {
-      await changePasswordMutation.mutateAsync({
-        currentPassword,
-        newPassword,
-      });
-      setCurrentPassword("");
-      setNewPassword("");
-      setNewPasswordConfirmation("");
-    } catch (error) {
-      setPasswordError(errorMessage(error, t("auth.passwordUpdateFailed")));
-    }
-  };
-
-  const handleEmailSubmit = async () => {
-    setEmailError(null);
-    setEmailVerificationPending(false);
-    try {
-      await changeEmailMutation.mutateAsync({
-        current_password: emailCurrentPassword,
-        new_email: newEmail.trim(),
-      });
-      setNewEmail("");
-      setEmailCurrentPassword("");
-    } catch (error) {
-      setEmailError(errorMessage(error, t("auth.emailUpdateFailed")));
-    }
-  };
-
-  const handleCreateToken = async () => {
-    const normalizedDays = tokenExpiryDays.trim();
-    const expiresInDays = Number(normalizedDays);
-    if (
-      !tokenName.trim() ||
-      (normalizedDays &&
-        (!Number.isInteger(expiresInDays) ||
-          expiresInDays < 1 ||
-          expiresInDays > 365))
-    ) {
-      setTokenError(t("auth.tokenValidation"));
-      return;
-    }
-    setTokenError(null);
-    try {
-      await createTokenMutation.mutateAsync({
-        expires_in_days: normalizedDays ? expiresInDays : null,
-        name: tokenName.trim(),
-      });
-    } catch (error) {
-      setTokenError(errorMessage(error, t("auth.tokenCreateFailed")));
-    }
-  };
-
-  const handleCopyToken = async () => {
-    if (!createdToken) return;
-    try {
-      await navigator.clipboard.writeText(createdToken);
-      setCopied(true);
-    } catch {
-      setTokenError(t("auth.copyFailed"));
-    }
-  };
-
-  const handleRevokeToken = async (id: string) => {
-    setTokenError(null);
-    try {
-      await revokeTokenMutation.mutateAsync(id);
-    } catch (error) {
-      setTokenError(errorMessage(error, t("auth.tokenRevokeFailed")));
-    }
-  };
-
-  const handleDeleteAccount = () => {
-    setDeleteError(null);
-    return deleteAccountMutation
-      .mutateAsync(deletePassword)
-      .then(() => setDeletePassword(""))
-      .catch((error: unknown) => {
-        setDeleteError(errorMessage(error, t("auth.deleteAccountFailed")));
-      });
-  };
-
-  const handleSignOut = async () => {
-    await authClient.signOut();
-    queryClient.clear();
-    await navigate({ replace: true, to: "/login" });
-  };
-
-  const isTeamAdmin =
-    meQuery.data?.role === "owner" || meQuery.data?.role === "admin";
+export function AccountSettingsDialog({
+  open,
+  onClose,
+}: {
+  open: boolean;
+  onClose: () => void;
+}) {
+  const {
+    accountPanel,
+    activeLabel,
+    cfUsageQuery,
+    dataTasksQuery,
+    handleSignOut,
+    isInstanceOwner,
+    isTeamAdmin,
+    meQuery,
+    mobileView,
+    navGroups,
+    retryExportMutation,
+    section,
+    session,
+    setMobileView,
+    setSection,
+    showVoiceSettings,
+    t,
+    vectorUsageQuery,
+  } = useAccountPageState({ open });
 
   return (
-    <div className="min-h-svh bg-background px-4 py-5 sm:py-8">
-      <main className="mx-auto flex w-full max-w-3xl flex-col gap-4">
-        <SubpageHeader />
-
-        <section className="flex flex-wrap items-end justify-between gap-3 border-b pb-4">
-          <div>
-            <h1 className="font-heading text-2xl font-semibold">
-              {t("auth.accountTitle")}
-            </h1>
-            <p className="mt-1 text-sm text-muted-foreground">
-              {session.data?.user.email}
-            </p>
-          </div>
-          <Button variant="outline" onClick={() => void handleSignOut()}>
-            <LogOutIcon data-icon="inline-start" />
-            {t("auth.signOut")}
-          </Button>
-        </section>
-
-        <Tabs
-          value={tab}
-          onValueChange={(value) => setTab(value as AccountTab)}
+    <Dialog
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen) onClose();
+      }}
+    >
+      <DialogContent
+        showCloseButton={false}
+        className="flex h-svh max-h-svh w-full max-w-none flex-col gap-0 overflow-hidden rounded-none border-0 p-0 sm:h-[min(46rem,calc(100svh-4rem))] sm:max-h-[calc(100svh-4rem)] sm:max-w-4xl sm:flex-row sm:rounded-2xl sm:border"
+      >
+        {/* ========================================================================= */}
+        {/* 1. NARROW SCREEN / MOBILE: MASTER VIEW (一级主菜单)                         */}
+        {/* ========================================================================= */}
+        <div
+          className={cn(
+            "flex flex-1 flex-col overflow-hidden bg-background sm:hidden",
+            mobileView === "detail" && "hidden",
+            mobileView === "master" && "motion-safe:animate-fade",
+          )}
         >
-          <TabsList className="w-full">
-            <TabsTrigger value="account">{t("auth.tab.account")}</TabsTrigger>
-            <TabsTrigger value="usage">{t("auth.tab.usage")}</TabsTrigger>
-            {isTeamAdmin && (
-              <TabsTrigger value="branding">
-                {t("auth.tab.branding")}
-              </TabsTrigger>
-            )}
-            {isTeamAdmin && (
-              <TabsTrigger value="admin">{t("auth.tab.admin")}</TabsTrigger>
-            )}
-          </TabsList>
+          {/* Mobile Master Navigation Bar */}
+          <div className="flex shrink-0 items-center justify-between border-b bg-background/90 px-4 py-3 backdrop-blur-md">
+            <DialogTitle className="text-lg font-semibold tracking-tight">
+              {t("settings.title")}
+            </DialogTitle>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={onClose}
+              className="h-8 px-2.5 font-medium text-primary hover:bg-accent/50"
+            >
+              {t("settings.done")}
+            </Button>
+          </div>
 
-          <TabsContent value="account" className="mt-4">
-            <div className="flex flex-col gap-4">
-              <ProfilePanel
-                currentUsername={session.data?.user.username ?? ""}
-                error={accountError}
-                isPending={updateUsernameMutation.isPending}
-                setUsername={setUsername}
-                t={t}
-                username={username}
-                onSubmit={handleUsernameSubmit}
+          {/* Mobile Master List */}
+          <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-5">
+            {/* Apple ID Style Account Header */}
+            <button
+              type="button"
+              onClick={() => {
+                setSection("account");
+                setMobileView("detail");
+              }}
+              className="flex w-full items-center justify-between gap-3.5 rounded-2xl border border-border/60 bg-card p-4 text-left shadow-2xs cursor-pointer hover:bg-accent/40 active:bg-accent/60 transition-colors"
+            >
+              <div className="flex min-w-0 items-center gap-3.5">
+                <Avatar
+                  src={
+                    meQuery.data?.avatar_url ?? session.data?.user.image ?? null
+                  }
+                  name={
+                    meQuery.data?.name ??
+                    session.data?.user.name ??
+                    session.data?.user.username ??
+                    ""
+                  }
+                  size="xl"
+                />
+                <div className="min-w-0">
+                  <div className="truncate text-base font-semibold text-foreground">
+                    {meQuery.data?.name ??
+                      session.data?.user.name ??
+                      session.data?.user.username}
+                  </div>
+                  <div className="truncate text-xs text-muted-foreground mt-0.5">
+                    {session.data?.user.username
+                      ? `@${session.data.user.username}`
+                      : session.data?.user.email}
+                  </div>
+                  <div className="mt-1.5 flex items-center gap-1.5">
+                    <Badge
+                      variant="secondary"
+                      className="h-4 px-1.5 text-xs font-normal"
+                    >
+                      {roleLabel(meQuery.data?.role, t)}
+                    </Badge>
+                  </div>
+                </div>
+              </div>
+              <ChevronRightIcon className="size-5 text-muted-foreground/40 shrink-0" />
+            </button>
+
+            {/* Mobile Nav Groups */}
+            {navGroups.map((group) => (
+              <SettingsSectionGroup
+                key={group.titleKey ?? "default"}
+                title={group.titleKey ? t(group.titleKey) : undefined}
+              >
+                {group.items.map((item) => (
+                  <SettingsRow
+                    key={item.id}
+                    icon={item.icon}
+                    iconColor={item.iconBg}
+                    label={item.label}
+                    chevron
+                    onClick={() => {
+                      setSection(item.id);
+                      setMobileView("detail");
+                    }}
+                  />
+                ))}
+              </SettingsSectionGroup>
+            ))}
+
+            {/* Mobile Sign Out */}
+            <SettingsSectionGroup>
+              <SettingsRow
+                destructive
+                icon={LogOutIcon}
+                label={t("auth.signOut")}
+                onClick={() => void handleSignOut()}
               />
+            </SettingsSectionGroup>
+          </div>
+        </div>
 
-              <InstallAppCard />
+        {/* ========================================================================= */}
+        {/* 2. NARROW SCREEN / MOBILE: DETAIL VIEW (二级详情页)                         */}
+        {/* ========================================================================= */}
+        <div
+          className={cn(
+            "flex flex-1 flex-col overflow-hidden bg-background sm:hidden",
+            mobileView === "master" && "hidden",
+            mobileView === "detail" && "motion-safe:animate-fade",
+          )}
+        >
+          {/* Mobile Detail Navigation Bar */}
+          <div className="flex shrink-0 items-center justify-between border-b bg-background/90 px-2 py-2 backdrop-blur-md">
+            <button
+              type="button"
+              onClick={() => setMobileView("master")}
+              className="flex items-center gap-1 text-sm font-medium text-primary hover:opacity-80 transition-opacity py-1 px-2 -ml-1"
+            >
+              <ChevronLeftIcon className="size-5" />
+              <span>{t("settings.title")}</span>
+            </button>
+            <h2 className="font-heading text-sm font-semibold tracking-tight truncate px-2 text-foreground">
+              {activeLabel}
+            </h2>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={onClose}
+              className="h-8 px-2.5 font-medium text-primary hover:bg-accent/50"
+            >
+              {t("settings.done")}
+            </Button>
+          </div>
 
-              <SecurityPanel
-                changeEmailIsPending={changeEmailMutation.isPending}
-                changePasswordIsPending={changePasswordMutation.isPending}
-                currentEmail={session.data?.user.email ?? ""}
-                currentPassword={currentPassword}
-                deleteAccountIsPending={deleteAccountMutation.isPending}
-                deleteError={deleteError}
-                deletePassword={deletePassword}
-                emailCurrentPassword={emailCurrentPassword}
-                emailError={emailError}
-                emailVerificationPending={emailVerificationPending}
-                isOwner={meQuery.data?.role === "owner"}
-                newPassword={newPassword}
-                newPasswordConfirmation={newPasswordConfirmation}
-                passwordError={passwordError}
-                setCurrentPassword={setCurrentPassword}
-                setDeletePassword={setDeletePassword}
-                setEmailCurrentPassword={setEmailCurrentPassword}
-                setNewEmail={setNewEmail}
-                setNewPassword={setNewPassword}
-                setNewPasswordConfirmation={setNewPasswordConfirmation}
-                t={t}
-                newEmail={newEmail}
-                onEmailSubmit={handleEmailSubmit}
-                onPasswordSubmit={handlePasswordSubmit}
-                onDeleteAccount={handleDeleteAccount}
-              />
-
-              <TokensPanel
-                copied={copied}
-                createTokenIsPending={createTokenMutation.isPending}
-                createdToken={createdToken}
-                locale={locale}
-                revokingTokenId={
-                  revokeTokenMutation.isPending
-                    ? revokeTokenMutation.variables
-                    : undefined
-                }
-                setTokenExpiryDays={setTokenExpiryDays}
-                setTokenName={setTokenName}
-                t={t}
-                tokenError={tokenError}
-                tokenExpiryDays={tokenExpiryDays}
-                tokenName={tokenName}
-                tokensQuery={tokensQuery}
-                onCopyToken={handleCopyToken}
-                onCreateToken={handleCreateToken}
-                onRevokeToken={handleRevokeToken}
-                onHideCreatedToken={() => setCreatedToken(null)}
-              />
-
-              <TransferPanel
+          {/* Mobile Detail Body */}
+          <div className="flex-1 overflow-y-auto p-4">
+            <div
+              className="flex flex-col gap-4 motion-safe:animate-fade"
+              key={section}
+            >
+              <SettingsSectionContent
+                accountPanel={accountPanel}
+                cfUsageQuery={cfUsageQuery}
                 dataTasksQuery={dataTasksQuery}
-                createExportIsPending={retryExportMutation.isPending}
-                retryExportIsPending={retryExportMutation.isPending}
-                t={t}
+                isInstanceOwner={isInstanceOwner}
+                isTeamAdmin={isTeamAdmin}
                 onCreateExport={() => retryExportMutation.mutate()}
                 onRetryExport={() => retryExportMutation.mutate()}
+                retryExportIsPending={retryExportMutation.isPending}
+                section={section}
+                showVoiceSettings={showVoiceSettings}
+                t={t}
+                vectorUsageQuery={vectorUsageQuery}
+                voiceUserId={session.data?.user.id}
               />
             </div>
-          </TabsContent>
+          </div>
+        </div>
 
-          <TabsContent value="usage" className="mt-4">
-            <UsagePanel t={t} vectorUsageQuery={vectorUsageQuery} />
-          </TabsContent>
+        {/* ========================================================================= */}
+        {/* 3. WIDE SCREEN / DESKTOP: macOS STYLE SPLIT VIEW (宽屏双栏分栏)            */}
+        {/* ========================================================================= */}
+        <aside className="hidden shrink-0 flex-col border-r bg-muted/30 p-3 sm:flex sm:w-64">
+          <div className="flex items-center justify-between px-2 pt-1 pb-2">
+            <DialogTitle className="text-base font-semibold tracking-tight text-foreground">
+              {t("settings.title")}
+            </DialogTitle>
+          </div>
 
-          {isTeamAdmin && (
-            <TabsContent value="branding" className="mt-4">
-              <BrandingCard />
-            </TabsContent>
-          )}
+          {/* Compact User Header in Sidebar */}
+          <button
+            type="button"
+            onClick={() => setSection("account")}
+            className={cn(
+              "flex w-full items-center gap-3 rounded-xl p-2.5 text-left transition-all cursor-pointer mb-2 border",
+              section === "account"
+                ? "bg-accent/80 border-border/60 shadow-2xs text-foreground"
+                : "border-transparent hover:bg-accent/40 text-foreground",
+            )}
+          >
+            <Avatar
+              src={meQuery.data?.avatar_url ?? session.data?.user.image ?? null}
+              name={
+                meQuery.data?.name ??
+                session.data?.user.name ??
+                session.data?.user.username ??
+                ""
+              }
+              size="sm"
+            />
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-1.5">
+                <p className="truncate text-sm font-semibold leading-tight text-foreground">
+                  {meQuery.data?.name ??
+                    session.data?.user.name ??
+                    session.data?.user.username}
+                </p>
+                <Badge
+                  variant="secondary"
+                  className="h-4 px-1.5 text-xs font-normal"
+                >
+                  {roleLabel(meQuery.data?.role, t)}
+                </Badge>
+              </div>
+              <p className="truncate text-xs text-muted-foreground mt-0.5">
+                {session.data?.user.username
+                  ? `@${session.data.user.username}`
+                  : t("settings.group.account")}
+              </p>
+            </div>
+          </button>
 
-          {isTeamAdmin && (
-            <TabsContent value="admin" className="mt-4">
-              <AdminPanel />
-            </TabsContent>
-          )}
-        </Tabs>
-      </main>
-    </div>
+          {/* Sidebar Nav Items */}
+          <nav className="flex-1 overflow-y-auto flex flex-col gap-3 py-1">
+            {navGroups.map((group) => (
+              <div
+                key={group.titleKey ?? "default"}
+                className="flex flex-col gap-0.5"
+              >
+                {group.titleKey && (
+                  <div className="px-2.5 pb-1 pt-1.5 text-xs font-medium text-muted-foreground">
+                    {t(group.titleKey)}
+                  </div>
+                )}
+                {group.items.map((item) => {
+                  const active = section === item.id;
+                  const Icon = item.icon;
+                  return (
+                    <button
+                      type="button"
+                      key={item.id}
+                      aria-current={active ? "true" : undefined}
+                      onClick={() => setSection(item.id)}
+                      className={cn(
+                        "flex h-9 items-center gap-3 rounded-lg px-2.5 text-sm transition-colors text-left",
+                        active
+                          ? "bg-accent text-accent-foreground font-medium"
+                          : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                      )}
+                    >
+                      <Icon className="size-4 shrink-0" />
+                      <span className="truncate flex-1">{item.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            ))}
+          </nav>
+
+          {/* Desktop Sign Out */}
+          <div className="mt-auto pt-3 border-t border-border/40">
+            <Button
+              className="h-9 w-full justify-start gap-3 px-2.5 text-sm text-muted-foreground hover:bg-muted hover:text-foreground"
+              onClick={() => void handleSignOut()}
+              variant="ghost"
+            >
+              <LogOutIcon
+                data-icon="inline-start"
+                className="size-4 shrink-0"
+              />
+              {t("auth.signOut")}
+            </Button>
+          </div>
+        </aside>
+
+        {/* Desktop Detail Pane */}
+        <section className="hidden min-w-0 flex-1 flex-col overflow-hidden sm:flex">
+          {/* Desktop Detail Header */}
+          <div className="flex shrink-0 items-center justify-between border-b px-6 py-4">
+            <h2 className="font-heading text-lg font-semibold tracking-tight text-foreground">
+              {activeLabel}
+            </h2>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              onClick={onClose}
+              aria-label={t("common.close")}
+              className="size-7 rounded-md text-muted-foreground hover:text-foreground"
+            >
+              <XIcon className="size-4" />
+            </Button>
+          </div>
+
+          {/* Desktop Detail Body */}
+          <div className="flex-1 overflow-y-auto">
+            <div className="mx-auto w-full max-w-2xl px-6 py-6">
+              <div
+                className="flex flex-col gap-4 motion-safe:animate-fade"
+                key={section}
+              >
+                <SettingsSectionContent
+                  accountPanel={accountPanel}
+                  cfUsageQuery={cfUsageQuery}
+                  dataTasksQuery={dataTasksQuery}
+                  isInstanceOwner={isInstanceOwner}
+                  isTeamAdmin={isTeamAdmin}
+                  onCreateExport={() => retryExportMutation.mutate()}
+                  onRetryExport={() => retryExportMutation.mutate()}
+                  retryExportIsPending={retryExportMutation.isPending}
+                  section={section}
+                  showVoiceSettings={showVoiceSettings}
+                  t={t}
+                  vectorUsageQuery={vectorUsageQuery}
+                  voiceUserId={session.data?.user.id}
+                />
+              </div>
+            </div>
+          </div>
+        </section>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+export function AccountPage() {
+  const navigate = useNavigate({ from: "/account" });
+  return (
+    <AccountSettingsDialog
+      open
+      onClose={() =>
+        void navigate({
+          search: { ...TIMELINE_SEARCH },
+          to: "/",
+        })
+      }
+    />
   );
 }

@@ -8,7 +8,10 @@ import {
   ReadingAudioProvider,
   useReadingAudio,
 } from "@/components/reading/reading-audio-provider";
-import { filterUnreferencedAttachments } from "@/lib/attachment-refs";
+import {
+  createImageDimensionResolver,
+  filterUnreferencedAttachments,
+} from "@/lib/attachment-refs";
 import { cn } from "@/lib/utils";
 
 export type ReadingViewProps = {
@@ -22,6 +25,9 @@ export type ReadingViewProps = {
    * the audio transport.
    */
   layout?: "card" | "article";
+  /** D2: live GFM checkboxes; see MemoContent. */
+  onToggleTask?: (lineIndex: number, checked: boolean) => void;
+  onConvertTask?: (lineIndex: number, text: string) => void;
 };
 
 function isAudio(attachment: Attachment) {
@@ -69,14 +75,27 @@ function useParagraphHighlight(
     if (!container) return;
 
     let highlighted: HTMLElement | null = null;
+    // Cache the cue list once per effect lifetime: re-querying and sorting
+    // the DOM on every playback tick was O(n log n) per tick for long
+    // transcripts. Cue elements are static for the container's lifetime.
+    let cachedCues: { element: HTMLElement; at: number }[] | null = null;
+    const cues = () => {
+      if (!cachedCues) {
+        cachedCues = Array.from(
+          container.querySelectorAll<HTMLElement>("[data-flaremo-t]"),
+        )
+          .map((element) => ({
+            element,
+            at: Number(element.dataset.flaremoT) || 0,
+          }))
+          .sort((a, b) => a.at - b.at);
+      }
+      return cachedCues;
+    };
     const apply = (seconds: number) => {
-      const cues = Array.from(
-        container.querySelectorAll<HTMLElement>("[data-flaremo-t]"),
-      ).sort((a, b) => Number(a.dataset.flaremoT) - Number(b.dataset.flaremoT));
-
       let active: HTMLElement | null = null;
-      for (const cue of cues) {
-        if (Number(cue.dataset.flaremoT) <= seconds) active = cue;
+      for (const cue of cues()) {
+        if (cue.at <= seconds) active = cue.element;
         else break;
       }
 
@@ -106,11 +125,24 @@ function ArticleReadingView({
   className,
   content,
   contentClassName,
+  onToggleTask,
+  onConvertTask,
+  resolveImageDimensions,
+  hasAudio,
 }: Required<Pick<ReadingViewProps, "attachments" | "content">> &
-  Pick<ReadingViewProps, "className" | "contentClassName">) {
+  Pick<
+    ReadingViewProps,
+    "className" | "contentClassName" | "onToggleTask" | "onConvertTask"
+  > & {
+    resolveImageDimensions: (
+      src: string,
+    ) => { width: number; height: number } | undefined;
+    /** Audio reading adds the sticky transport + transcript highlight. */
+    hasAudio: boolean;
+  }) {
   const bodyRef = useRef<HTMLDivElement>(null);
   const audio = useReadingAudio();
-  useParagraphHighlight(bodyRef, Boolean(audio?.track));
+  useParagraphHighlight(bodyRef, hasAudio && Boolean(audio?.track));
 
   // Audio rides in the sticky bar and body-referenced images render inline,
   // so the gallery keeps only the files the body does not already show.
@@ -119,11 +151,14 @@ function ArticleReadingView({
 
   return (
     <div className={cn("flex flex-col gap-4", className)}>
-      <ReadingAudioBar />
+      {hasAudio && <ReadingAudioBar />}
       {/* Stacked on narrow screens (outline collapsed above the body), two
           columns from lg up. The width classes are lg-scoped so the mobile
           outline takes the full row instead of squeezing the transcript. */}
       <div className="flex flex-col gap-4 lg:flex-row lg:gap-6">
+        {/* The outline is article-layout equipment, not audio equipment:
+            any piece with ≥2 headings gets a TOC (MemoOutline hides itself
+            below that threshold). */}
         <MemoOutline
           className="lg:order-2 lg:w-44 lg:shrink-0"
           content={content}
@@ -135,8 +170,11 @@ function ArticleReadingView({
           <LazyMemoContent
             className={contentClassName}
             content={content}
-            onTimestampClick={audio?.seek}
+            onTimestampClick={hasAudio ? audio?.seek : undefined}
+            resolveImageDimensions={resolveImageDimensions}
             withHeadingIds
+            onToggleTask={onToggleTask}
+            onConvertTask={onConvertTask}
           />
           {galleryAttachments.length > 0 && (
             <AttachmentGallery attachments={galleryAttachments} />
@@ -152,15 +190,31 @@ function PlainReadingView({
   className,
   content,
   contentClassName,
+  onToggleTask,
+  onConvertTask,
+  resolveImageDimensions,
 }: Required<Pick<ReadingViewProps, "attachments" | "content">> &
-  Pick<ReadingViewProps, "className" | "contentClassName">) {
+  Pick<
+    ReadingViewProps,
+    "className" | "contentClassName" | "onToggleTask" | "onConvertTask"
+  > & {
+    resolveImageDimensions: (
+      src: string,
+    ) => { width: number; height: number } | undefined;
+  }) {
   const galleryAttachments = filterUnreferencedAttachments(
     attachments,
     content,
   );
   return (
     <div className={cn("flex flex-col gap-4", className)}>
-      <LazyMemoContent className={contentClassName} content={content} />
+      <LazyMemoContent
+        className={contentClassName}
+        content={content}
+        resolveImageDimensions={resolveImageDimensions}
+        onToggleTask={onToggleTask}
+        onConvertTask={onConvertTask}
+      />
       {galleryAttachments.length > 0 && (
         <AttachmentGallery attachments={galleryAttachments} />
       )}
@@ -178,21 +232,36 @@ export function MemoReadingView({
   content,
   contentClassName,
   layout = "article",
+  onToggleTask,
+  onConvertTask,
 }: ReadingViewProps) {
   // Stable identity across renders: the provider keys restore/save effects on
   // the active track object.
   const tracks = useMemo(() => MemoAudioTracks(attachments), [attachments]);
+  const resolveImageDimensions = useMemo(
+    () => createImageDimensionResolver(attachments),
+    [attachments],
+  );
 
-  if (layout === "article" && tracks.length > 0) {
-    return (
-      <ReadingAudioProvider tracks={tracks}>
-        <ArticleReadingView
-          attachments={attachments}
-          className={className}
-          content={content}
-          contentClassName={contentClassName}
-        />
-      </ReadingAudioProvider>
+  if (layout === "article") {
+    const readingView = (
+      <ArticleReadingView
+        attachments={attachments}
+        className={className}
+        content={content}
+        contentClassName={contentClassName}
+        hasAudio={tracks.length > 0}
+        resolveImageDimensions={resolveImageDimensions}
+        onToggleTask={onToggleTask}
+        onConvertTask={onConvertTask}
+      />
+    );
+    // Audio articles additionally get the transport provider (seek/follow);
+    // text articles share the same outline + body treatment without one.
+    return tracks.length > 0 ? (
+      <ReadingAudioProvider tracks={tracks}>{readingView}</ReadingAudioProvider>
+    ) : (
+      readingView
     );
   }
 
@@ -202,6 +271,9 @@ export function MemoReadingView({
       className={className}
       content={content}
       contentClassName={contentClassName}
+      resolveImageDimensions={resolveImageDimensions}
+      onToggleTask={onToggleTask}
+      onConvertTask={onConvertTask}
     />
   );
 }

@@ -77,6 +77,7 @@ curl http://127.0.0.1:8787/__scheduled
 - 超过内联上限时前端自动改用**导出任务**：`POST /api/v1/export/tasks` 创建任务，分页读取 D1 并把数据按类型写成 R2 下的 NDJSON 分块（`exports/<task-id>/data/*.ndjson`），最后生成自包含 `manifest.json`（记录每类数据块、附件清单及逻辑附件 ID）。
 - 任务状态通过 `GET /api/v1/export/tasks/:id` 查询；manifest 经 `GET .../manifest` 下载；附件经 `GET .../attachments/:attachmentId` 流式下载（不暴露裸 R2 key）。
 - 导入走 `POST /api/v1/import/tasks`（请求内执行并记录结果），`data_tasks` 表记录 `queued/running/succeeded/failed` 全生命周期。每日 cron 兜底把 lease 过期的 stale 任务标记为失败，并清理超过 7 天的任务行与对应 R2 导出产物。
+- 绑定 `flaremo-data-export` Queue 时，`POST /api/v1/export/tasks` 创建任务后投递 `{taskId}` 并立即返回 queued，由 queue 消费端执行导出；未绑定的部署仍在请求内执行。两条路径共用同一个幂等 executor（只认领 `queued` 行，重放安全），scheduled maintenance 同时是兜底 reconciler。
 - 成员移除使用独立的 `member_removal_jobs` 表，记录操作人、阶段、尝试次数和错误；管理员重试会投递 `flaremo-member-removal` Queue，scheduled maintenance 作为未绑定 Queue 或旧环境的 fallback。迁移 0016 后应在管理员页检查失败任务并按需重试。
 
 `data_tasks` 和 `member_removal_jobs` 都是业务数据，会包含在你的 D1 备份中；导出产物本身在 R2 的 `exports/` 前缀下，随任务行过期后由 cron 清理。Queue 消息是可重放的 job ID，恢复 D1 后应先确认 Queue 资源和 migration 状态，再允许后台清理运行。
@@ -89,7 +90,7 @@ D1 备份建议使用 Cloudflare dashboard 或 Wrangler 导出能力生成 SQL d
 
 认证表也属于 D1 的持久业务数据。它们包含 session、账户关联和 PAT 的敏感校验数据，备份文件必须按生产数据同等敏感级别保存；不要把导出文件上传到 issue、聊天或公开 artifact。
 
-不要在文档或临时 shell 命令里维护第二份手写表清单。唯一清单在 [`scripts/persistence-manifest.mjs`](../scripts/persistence-manifest.mjs)：其中的 `RESTORE_TABLES` 覆盖身份、memo/SSE/webhook/通知、附件、导入导出任务、Agent Memory、用量、项目与任务等所有 D1 事实源表；`embedding_tasks` 则属于可由事实源重建的派生工作队列。`pnpm persistence:check` 会把这份清单与 `packages/db/src/schema.ts` 的每一个 `sqliteTable` 对比，少表、多表或重复分类都会失败；它也是 `pnpm verify` 的第一道门禁。
+不要在文档或临时 shell 命令里维护第二份手写表清单。唯一清单在 [`scripts/persistence-manifest.mjs`](../scripts/persistence-manifest.mjs)：其中的 `RESTORE_TABLES` 覆盖身份、memo/SSE/webhook/通知、附件、导入导出任务、Agent Memory、用量、项目与任务等所有 D1 事实源表；`embedding_tasks` 则属于可由事实源重建的派生工作队列。`pnpm persistence:check` 会把这份清单与 `packages/db/src/schema/` 下每个模块的每一个 `sqliteTable` 对比，少表、多表或重复分类都会失败；它也是 `pnpm verify` 的第一道门禁。
 
 日常演练请直接使用 `pnpm backup:drill`，真实远端恢复验证使用 `pnpm backup:drill:remote`。两个脚本从同一清单生成 Wrangler 的 `--table` 参数、按依赖顺序的恢复文件和源/目标逐表计数校验。每次认证或 schema 变更后仍需重新演练，不要把旧的 drill 结果当作新的恢复证明。
 
@@ -151,6 +152,8 @@ pnpm exec wrangler r2 bucket delete "$FLAREMO_RESTORE_BUCKET"
 如果生产 D1 当前没有有效附件记录，R2 复制计数为 0 是正确结果；演练仍会验证源 bucket、目标 bucket 和恢复后的 attachment 元数据计数。不要扫描或复制 D1 未引用的未知对象。
 
 历史真实演练（2026-07-23）只证明当时的早期表集合：生产 D1 的 1 个用户、2 条 memo 和对应 FTS 行被恢复到临时 D1，生产当时没有有效 attachment。它**不能**替代本清单引入后的全表恢复证明；在下一次生产 schema 或恢复流程变更前后，都应重新完成一次远端演练并更新本记录。
+
+2026-09-15 全表恢复演练已完成并通过：持久化清单全部 36 张表 + 两个 FTS 索引逐表计数源/目标一致（5 条 memo、FTS 5 行），0 条有效附件对应 R2 复制计数 0，最后以临时 D1/R2 生成的 Wrangler 配置通过 deploy dry-run；临时资源已当场删除。本次演练暴露并修复了两个真实问题：一是 09-14 引入根目录 `wrangler.json` 后隐式配置解析会命中占位 UUID，`remote-restore-drill.mjs` 现在显式 pin `wrangler.jsonc`；二是自部署生产 schema 停在 8/30（仍有 `users.role`、无 `auth_organizations` 等新表），旧备份无法按列原样装入当前 schema——导出器已改为**按两侧共有列做显式列名 INSERT**（`remote-restore-drill.mjs` 的 schema-adaptive 导出），并在恢复末尾从遗留 `users.role` 重新推导默认团队与 owner 成员（对应 migration 0020 的 backfill）。旧备份 + 新 schema 的恢复路径从此是被演练覆盖的主路径，而不是假设。
 
 ## 线上排障
 

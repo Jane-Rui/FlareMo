@@ -1,16 +1,16 @@
 name: Deploy to Cloudflare Workers
 
 on:
-  push:
-    branches:
-      - main
-    paths-ignore:
-      - ".github/**"
-      - "README.md"
-      - "README.en.md"
-      - "CHANGELOG.md"
-      - "docs/**"
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Validate build, resources and bundle without production writes"
+        type: boolean
+        default: true
+      backup_confirmed:
+        description: "For production enter BACKUP_CONFIRMED after securing a D1 backup"
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -43,10 +43,39 @@ jobs:
       - name: Build web assets
         run: pnpm --filter @flaremo/web build
 
-      - name: Deploy to Cloudflare Workers
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: f6ff30bba40fbc7d791d83ab3e70daf9
-          workingDirectory: "."
-          command: deploy --config ./wrangler.jsonc
+      - name: Check release authorization
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+          BACKUP_CONFIRMED: ${{ inputs.backup_confirmed }}
+        run: |
+          if [ "$DRY_RUN" != "true" ] && [ "$BACKUP_CONFIRMED" != "BACKUP_CONFIRMED" ]; then
+            echo "Production publication requires a verified D1 backup."
+            exit 1
+          fi
+
+      - name: Check existing Cloudflare resources
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: f6ff30bba40fbc7d791d83ab3e70daf9
+        run: pnpm provision:remote --check
+
+      - name: Validate Worker bundle
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: f6ff30bba40fbc7d791d83ab3e70daf9
+        run: pnpm exec wrangler deploy --config ./wrangler.jsonc --dry-run
+
+      - name: Apply D1 migrations and deploy
+        if: ${{ !inputs.dry_run }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: f6ff30bba40fbc7d791d83ab3e70daf9
+        run: |
+          pnpm migrate:remote
+          pnpm exec wrangler deploy --config ./wrangler.jsonc
+
+      - name: Smoke check public origin
+        if: ${{ !inputs.dry_run }}
+        run: pnpm smoke:check
+        env:
+          FLAREMO_PUBLIC_URL: https://flaremo.48kr.top

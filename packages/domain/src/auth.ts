@@ -1,6 +1,8 @@
 import {
   authApiKeys,
   authBootstrap,
+  authMembers,
+  authOrganizations,
   authSessions,
   authUserLinks,
   authUsers,
@@ -10,7 +12,13 @@ import {
 } from "@flaremo/db";
 import { and, desc, eq, gt } from "drizzle-orm";
 import { ConflictError } from "./errors";
-import { ensureSingleUser, type SingleUserConfig } from "./users";
+import type { TeamRole, TeamViewer } from "./team-permissions";
+import {
+  addTeamMember,
+  DEFAULT_TEAM_SLUG,
+  ensureSingleUser,
+  type SingleUserConfig,
+} from "./users";
 
 const OWNER_BOOTSTRAP_ID = "bootstrap/owner";
 export const OWNER_FLAREMO_USER_ID = "users/owner";
@@ -92,6 +100,7 @@ export async function completeOwnerBootstrap(
     flaremoUserId: user.id,
     createdAt: new Date(),
   });
+  await addTeamMember(db, { authUserId: input.authUserId, role: "owner" });
 
   await db
     .update(authBootstrap)
@@ -192,6 +201,7 @@ export async function reconcileOwnerBootstrap(db: FlareMoDb): Promise<UserRow> {
       })
       .onConflictDoNothing();
   }
+  await addTeamMember(db, { authUserId: authUser.id, role: "owner" });
 
   const completed = await db
     .update(authBootstrap)
@@ -245,20 +255,151 @@ export async function getOwnerAuthUserId(
   return bootstrap.authUserId;
 }
 
+/**
+ * The raw membership row for the default team, without expiry handling.
+ * Callers that enforce access must prefer {@link getViewerTeamMembership},
+ * which folds expired readers out; this exists for /me (surfacing the
+ * expired state) and the admin member list.
+ */
+export async function getMembershipState(
+  db: FlareMoDb,
+  authUserId: string,
+): Promise<{
+  role: TeamRole;
+  organizationId: string;
+  organizationName: string;
+  expiresAt: Date | null;
+} | null> {
+  const row = await db
+    .select({
+      role: authMembers.role,
+      expiresAt: authMembers.expiresAt,
+      organizationId: authOrganizations.id,
+      organizationName: authOrganizations.name,
+    })
+    .from(authMembers)
+    .innerJoin(
+      authOrganizations,
+      eq(authOrganizations.id, authMembers.organizationId),
+    )
+    .where(
+      and(
+        eq(authMembers.userId, authUserId),
+        eq(authOrganizations.slug, DEFAULT_TEAM_SLUG),
+      ),
+    )
+    .get();
+  if (!row) return null;
+  return {
+    role: row.role as TeamRole,
+    organizationId: row.organizationId,
+    organizationName: row.organizationName,
+    expiresAt: row.expiresAt ?? null,
+  };
+}
+
+/**
+ * Whether a resolved membership still grants access. Readers with a past
+ * `expiresAt` fail closed (the seat lapses without a cron sweep); every other
+ * role is open-ended. Shared by the single-query viewer resolution and the
+ * standalone membership lookup so the two can never disagree.
+ */
+function isMembershipActive(role: TeamRole, expiresAt: Date | null): boolean {
+  if (role === "reader" && expiresAt) {
+    return expiresAt.getTime() > Date.now();
+  }
+  return true;
+}
+
+/**
+ * Resolve the deployment team membership (role + organization id) for a
+ * Better Auth identity in one indexed query. Null when the deployment has no
+ * team, the identity is not a member, or the membership is an expired
+ * reader seat — the single fail-closed gate that makes "到期自动失去访问"
+ * hold for every downstream consumer without a cron sweep.
+ */
+export async function getViewerTeamMembership(
+  db: FlareMoDb,
+  authUserId: string,
+): Promise<{
+  role: TeamRole;
+  organizationId: string;
+  organizationName: string;
+} | null> {
+  const state = await getMembershipState(db, authUserId);
+  if (!state) return null;
+  if (!isMembershipActive(state.role, state.expiresAt)) return null;
+  return {
+    role: state.role,
+    organizationId: state.organizationId,
+    organizationName: state.organizationName,
+  };
+}
+
 export async function getFlaremoUserByAuthUserId(
   db: FlareMoDb,
   authUserId: string,
-): Promise<UserRow | null> {
-  const link = await db.query.authUserLinks.findFirst({
-    where: eq(authUserLinks.authUserId, authUserId),
-  });
-  if (!link) return null;
+): Promise<TeamViewer | null> {
+  // Runs on every authenticated request, so the link, the domain user and the
+  // team membership resolve in one indexed join instead of three serial round
+  // trips. The organization is left-joined by its fixed slug first, then the
+  // membership by (auth user, organization) — a miss on either side leaves the
+  // role null, which is exactly the fail-closed shape the old three-step read
+  // produced for a non-member.
+  const row = await db
+    .select({
+      user: users,
+      role: authMembers.role,
+      expiresAt: authMembers.expiresAt,
+      organizationId: authOrganizations.id,
+      organizationName: authOrganizations.name,
+    })
+    .from(authUserLinks)
+    .innerJoin(users, eq(users.id, authUserLinks.flaremoUserId))
+    .leftJoin(authOrganizations, eq(authOrganizations.slug, DEFAULT_TEAM_SLUG))
+    .leftJoin(
+      authMembers,
+      and(
+        eq(authMembers.userId, authUserLinks.authUserId),
+        eq(authMembers.organizationId, authOrganizations.id),
+      ),
+    )
+    .where(eq(authUserLinks.authUserId, authUserId))
+    .get();
+  if (!row) return null;
 
-  return (
-    (await db.query.users.findFirst({
-      where: eq(users.id, link.flaremoUserId),
-    })) ?? null
-  );
+  const role = (row.role ?? null) as TeamRole | null;
+  const membership =
+    role && row.organizationId && row.organizationName
+      ? {
+          role,
+          organizationId: row.organizationId,
+          organizationName: row.organizationName,
+        }
+      : null;
+  const activeMembership =
+    membership && isMembershipActive(membership.role, row.expiresAt ?? null)
+      ? membership
+      : null;
+
+  return {
+    ...row.user,
+    teamRole: activeMembership?.role ?? null,
+    teamOrganizationId: activeMembership?.organizationId ?? null,
+  };
+}
+
+/**
+ * The deployment team as the UI sees it: id plus display name. Null when the
+ * viewer has no membership — the sidebar hides the team space entirely.
+ */
+export async function getViewerTeamInfo(
+  db: FlareMoDb,
+  authUserId: string,
+): Promise<{ id: string; name: string } | null> {
+  const membership = await getViewerTeamMembership(db, authUserId);
+  if (!membership) return null;
+  return { id: membership.organizationId, name: membership.organizationName };
 }
 
 export async function getAuthUserIdByFlaremoUserId(
@@ -349,4 +490,22 @@ export async function getMemosPersonalAccessToken(
       ),
     })) ?? null
   );
+}
+
+/** Hard-delete a token row, scoped to its owner. Returns the deleted id or null. */
+export async function deleteMemosPersonalAccessToken(
+  db: FlareMoDb,
+  input: { authUserId: string; keyId: string },
+) {
+  const deleted = await db
+    .delete(authApiKeys)
+    .where(
+      and(
+        eq(authApiKeys.id, input.keyId),
+        eq(authApiKeys.referenceId, input.authUserId),
+        eq(authApiKeys.configId, "memos"),
+      ),
+    )
+    .returning({ id: authApiKeys.id });
+  return deleted[0]?.id ?? null;
 }

@@ -1,11 +1,13 @@
 import {
   beginFlaremoMemberRemoval,
+  ConflictError,
   createMemberRemovalJob,
+  deleteMemosPersonalAccessToken,
   ForbiddenError,
   finalizeFlaremoMemberRemoval,
   getMemosPersonalAccessToken,
   isFlaremoUserEmailTaken,
-  isOwner,
+  isInstanceOwner,
   listMemosPersonalAccessTokens,
   NotFoundError,
   updateFlaremoUserEmail,
@@ -16,9 +18,16 @@ import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import { z } from "zod";
 import { cleanupFlaremoArtifacts } from "../artifact-cleanup";
-import { createFlareMoAuth, getPublicUrl, MEMOS_PAT_CONFIG_ID } from "../auth";
-import { getBrowserRequestContext, type HonoBindings } from "../context";
-import { resolveEmailConfig, sendEmailChangeVerificationEmail } from "../email";
+import { getPublicUrl, MEMOS_PAT_CONFIG_ID } from "../auth-env";
+import {
+  getBrowserRequestContext,
+  type HonoBindings,
+  loadAuthFactory,
+} from "../context";
+import {
+  resolveEmailSendConfig,
+  sendEmailChangeVerificationEmail,
+} from "../email";
 import { jsonError } from "../http";
 
 export const accountApi = new Hono<HonoBindings>();
@@ -59,6 +68,7 @@ accountApi.post(
     try {
       const context = await getBrowserRequestContext(c);
       const input = c.req.valid("json");
+      const { createFlareMoAuth } = await loadAuthFactory();
       const auth = createFlareMoAuth(c.env, context.db);
       const created = await auth.api.createApiKey({
         body: {
@@ -97,6 +107,7 @@ accountApi.post("/personal-access-tokens/:id/revoke", async (c) => {
       throw new NotFoundError("Personal access token not found.");
     }
 
+    const { createFlareMoAuth } = await loadAuthFactory();
     const auth = createFlareMoAuth(c.env, context.db);
     const updated = await auth.api.updateApiKey({
       body: {
@@ -112,11 +123,28 @@ accountApi.post("/personal-access-tokens/:id/revoke", async (c) => {
   }
 });
 
+accountApi.delete("/personal-access-tokens/:id", async (c) => {
+  try {
+    const context = await getBrowserRequestContext(c);
+    const deleted = await deleteMemosPersonalAccessToken(context.db, {
+      authUserId: context.authUserId,
+      keyId: c.req.param("id"),
+    });
+    if (!deleted) {
+      throw new NotFoundError("Personal access token not found.");
+    }
+    return c.json({ ok: true });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
 accountApi.post("/email", zValidator("json", changeEmailSchema), async (c) => {
   try {
     const context = await getBrowserRequestContext(c);
     const input = c.req.valid("json");
     const newEmail = input.new_email.trim().toLowerCase();
+    const { createFlareMoAuth } = await loadAuthFactory();
     const auth = createFlareMoAuth(c.env, context.db);
 
     // Changing the login identity re-authenticates the caller with their
@@ -132,28 +160,33 @@ accountApi.post("/email", zValidator("json", changeEmailSchema), async (c) => {
       throw new ValidationError("The current password is incorrect.");
     }
 
+    // An address that already belongs to another identity is a conflict in
+    // both credential stores, and neither write may be attempted: Better Auth
+    // rejects an occupied auth email with a raw unique-index error that reads
+    // as a server fault. Checked ahead of the branch below so the
+    // no-provider deployment cannot reach that write.
+    const existingAuthUser = await auth.findAuthUserByEmail(newEmail);
+    if (existingAuthUser && existingAuthUser.id !== context.authUserId) {
+      throw new ConflictError("That email is already in use.");
+    }
+    if (await isFlaremoUserEmailTaken(context.db, newEmail, context.user.id)) {
+      throw new ConflictError("That email is already in use.");
+    }
+
     // When a transactional-email provider is configured, the change only
     // takes effect after the NEW address confirms ownership through its
     // verification link, so a typo cannot lock the account out of every
     // future email flow.
-    if (resolveEmailConfig(c.env).provider !== "none") {
-      const existingAuthUser = await auth.findAuthUserByEmail(newEmail);
-      if (existingAuthUser && existingAuthUser.id !== context.authUserId) {
-        throw new ValidationError("That email is already in use.");
-      }
-      if (
-        await isFlaremoUserEmailTaken(context.db, newEmail, context.user.id)
-      ) {
-        throw new ValidationError("That email is already in use.");
-      }
+    if ((await resolveEmailSendConfig(c.env, context.db)).provider !== "none") {
       const token = await auth.createEmailChangeToken(
         context.authUserId,
         newEmail,
       );
-      const sent = await sendEmailChangeVerificationEmail(c.env, {
+      const sent = await sendEmailChangeVerificationEmail(c.env, context.db, {
         to: newEmail,
         token,
         publicUrl: getPublicUrl(c.env),
+        acceptLanguage: c.req.header("accept-language"),
       });
       if (!sent) {
         return c.json(
@@ -187,12 +220,13 @@ accountApi.post("/email", zValidator("json", changeEmailSchema), async (c) => {
 accountApi.delete("/", zValidator("json", deleteAccountSchema), async (c) => {
   try {
     const context = await getBrowserRequestContext(c);
-    if (isOwner(context.user)) {
+    if (isInstanceOwner(context.user)) {
       throw new ForbiddenError(
         "The owner account cannot be deleted through the app.",
       );
     }
     const input = c.req.valid("json");
+    const { createFlareMoAuth } = await loadAuthFactory();
     const auth = createFlareMoAuth(c.env, context.db);
     // Self-destruction re-authenticates the caller with their current
     // password. Better Auth raises on a mismatch, which maps to a plain

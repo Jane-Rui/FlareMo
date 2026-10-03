@@ -14,7 +14,7 @@ import type {
   ShareRow,
   UserRow,
 } from "@flaremo/db";
-import { canEditMemo } from "@flaremo/domain";
+import { canEditMemo, canGovernMemo } from "@flaremo/domain";
 
 type MemoRelationRow = {
   memoId: string;
@@ -40,6 +40,7 @@ export function memoToDto(
     update_time: memo.updatedAt,
     display_time: memo.createdAt,
     creator: memo.userId,
+    source: memo.source,
     ...(creatorName ? { creator_name: creatorName } : {}),
   };
 }
@@ -106,9 +107,12 @@ export function memosToListResponse(input: {
   return {
     memos: input.memos.map((memo) => ({
       ...memoToDto(memo, input.user, input.creatorNames?.get(memo.userId)),
-      // Single source of truth for the edit/manage rule (see canEditMemo);
-      // clients must not re-derive team permissions locally.
+      // Single source of truth for the edit/manage rules (see canEditMemo
+      // and canGovernMemo); clients must not re-derive team permissions
+      // locally. can_manage covers content edits and republishing, while
+      // can_govern covers archive/trash/restore lifecycle actions.
       can_manage: canEditMemo(input.user, memo),
+      can_govern: canGovernMemo(input.user, memo),
       ...(input.attachmentsByMemo
         ? {
             attachments: (input.attachmentsByMemo.get(memo.id) ?? []).map(
@@ -127,10 +131,6 @@ export function parseMemosResourceName(name: string) {
 
 export function parseAttachmentsResourceName(name: string) {
   return parseResourceName(name, "attachments");
-}
-
-export function parseSharesResourceName(name: string) {
-  return parseResourceName(name, "shares");
 }
 
 function parseResourceName(

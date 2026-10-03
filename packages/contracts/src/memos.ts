@@ -1,14 +1,24 @@
 import { z } from "zod";
 import {
+  exportMemoryEventSchema,
+  exportMemoryEvidenceSchema,
   exportMemoryRelationSchema,
   exportMemoryResourceLinkSchema,
   exportMemoryRevisionSchema,
   importMemorySchema,
   memoryDtoSchema,
 } from "./memory";
+import {
+  projectStatusSchema,
+  taskActivityActionSchema,
+  taskActorTypeSchema,
+  taskPrioritySchema,
+  taskStatusSchema,
+} from "./projects";
 import { memoSearchScopes } from "./search-query";
 
 export const memoVisibilitySchema = z.enum(["private", "protected", "public"]);
+export const memoSpaceSchema = z.enum(["all", "personal", "team"]);
 export const memoStatusSchema = z.enum([
   "normal",
   "archived",
@@ -44,6 +54,11 @@ export const memoPayloadSchema = z
     // domain layer only promotes a non-empty value up to 128 characters to
     // the internal idempotency key, without rejecting existing clients.
     client_id: z.string().optional(),
+    // Voice capture (rollout §4.2): playback length of the session and the
+    // attachment id that carries the recording. Optional so payloads from
+    // before P3 — and from other clients — keep parsing unchanged.
+    durationSeconds: z.number().optional(),
+    audioAttachmentId: z.string().optional(),
   })
   .passthrough();
 
@@ -73,6 +88,7 @@ export const listMemosQuerySchema = z.object({
   order_by: memoOrderBySchema.default("created_at desc"),
   state: memoStatusSchema.optional(),
   visibility: memoVisibilitySchema.optional(),
+  space: memoSpaceSchema.optional(),
   q: z
     .string()
     .optional()
@@ -89,6 +105,31 @@ export const listMemosQuerySchema = z.object({
 
 export const memoStatsQuerySchema = z.object({
   time_zone: z.string().trim().min(1).max(100).default("UTC"),
+  // Space-partitioned sidebar stats; absent means the viewer's own corpus
+  // (the historical, Memos-compatible semantics). `all` is accepted and
+  // normalized to absent by the route, matching what the memo list and the tag
+  // hierarchy already do — sending it through used to widen the corpus to every
+  // memo the viewer could read, so the sidebar's three number blocks each read
+  // a different set.
+  space: memoSpaceSchema.optional(),
+  /**
+   * Length of the trailing `activity` window in local days. The heatmap's year
+   * view needs 366; the default keeps the historical 84-day window. Capped so
+   * one request cannot ask for an unbounded range.
+   */
+  days: z.coerce.number().int().min(1).max(366).default(84),
+  /**
+   * Local date (viewer's zone, YYYY-MM-DD) anchoring the END of the trailing
+   * `activity` window. Absent means today. The year view passes the navigated
+   * year's Dec 31 so a historical year renders its own cells instead of
+   * sharing the trailing-today window, which covers at most its tail (issue
+   * #144). Format-validated only: a future anchor just renders structural
+   * zeros, the same shape the current year's grid already shows past today.
+   */
+  until: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .optional(),
 });
 
 export const dailyReviewQuerySchema = z.object({
@@ -147,9 +188,16 @@ export const memoDtoSchema = z.object({
   display_time: z.string(),
   creator: z.string(),
   creator_name: z.string().optional(),
+  // Submission client ("web", "voice", …); absent on legacy rows. The
+  // timeline uses it for the voice-capture face (rollout §4.3).
+  source: z.string().optional(),
   // Server-computed edit/manage permission for the requesting user, so
   // clients never re-derive the team permission rules locally.
   can_manage: z.boolean().optional(),
+  // Lifecycle-governance permission (archive/trash/restore) for the
+  // requesting user; administrators hold it on other members' team memos
+  // even though they cannot edit them.
+  can_govern: z.boolean().optional(),
   attachments: z.array(attachmentDtoSchema).optional(),
 });
 
@@ -164,6 +212,13 @@ export const memoStatsResponseSchema = z.object({
     archived: z.number().int().nonnegative(),
     trashed: z.number().int().nonnegative(),
     total: z.number().int().nonnegative(),
+    /** Normal-state counts per space, only present on space-scoped queries. */
+    spaces: z
+      .object({
+        personal: z.number().int().nonnegative(),
+        team: z.number().int().nonnegative(),
+      })
+      .optional(),
   }),
   active_days: z.number().int().nonnegative(),
   tags: z.array(
@@ -265,6 +320,7 @@ export const memoRelationContextResponseSchema = z.object({
 export const memoContextResponseSchema = z.object({
   memo: memoDtoSchema,
   can_manage: z.boolean(),
+  can_govern: z.boolean(),
   attachments: z.array(attachmentDtoSchema),
   shares: z.array(shareDtoSchema),
   relations: z.array(memoRelationContextSchema),
@@ -296,7 +352,15 @@ const importShareSchema = shareDtoSchema.partial({
 });
 
 export const importBundleSchema = z.object({
-  version: z.union([z.literal(1), z.literal(2), z.literal(3)]).default(1),
+  version: z
+    .union([
+      z.literal(1),
+      z.literal(2),
+      z.literal(3),
+      z.literal(4),
+      z.literal(5),
+    ])
+    .default(1),
   memos: z
     .array(
       memoDtoSchema
@@ -335,6 +399,62 @@ export const importBundleSchema = z.object({
     .array(exportMemoryResourceLinkSchema)
     .max(100_000)
     .default([]),
+  // v5: the memory ledger's evidence chain and lifecycle trail joined the
+  // bundle. Both are user-owned source data (not derived state): without them a
+  // round-trip would drop every "why does this fact exist" link and the whole
+  // supersession narrative, which is the product's core promise.
+  memory_evidence: z.array(exportMemoryEvidenceSchema).max(200_000).default([]),
+  memory_events: z.array(exportMemoryEventSchema).max(200_000).default([]),
+  // v4: projects/tasks/task_activity joined the self-service bundle. Rows keep
+  // their namespaced ids; soft-deleted (recycle-bin) rows travel with
+  // `deleted_at` so nothing is silently dropped from a backup.
+  projects: z
+    .array(
+      z.object({
+        name: z.string(),
+        title: z.string(),
+        description: z.string().nullable(),
+        status: projectStatusSchema,
+        deleted_at: z.string().nullable(),
+        created_at: z.string(),
+        updated_at: z.string(),
+      }),
+    )
+    .max(10_000)
+    .default([]),
+  tasks: z
+    .array(
+      z.object({
+        name: z.string(),
+        project_id: z.string().nullable(),
+        source_memo_id: z.string().nullable(),
+        title: z.string(),
+        notes: z.string().nullable(),
+        status: taskStatusSchema,
+        priority: taskPrioritySchema,
+        due_at: z.string().nullable(),
+        sort_order: z.number().int(),
+        completed_at: z.string().nullable(),
+        deleted_at: z.string().nullable(),
+        created_at: z.string(),
+        updated_at: z.string(),
+      }),
+    )
+    .max(50_000)
+    .default([]),
+  task_activity: z
+    .array(
+      z.object({
+        task_id: z.string().nullable(),
+        actor_type: taskActorTypeSchema,
+        actor_name: z.string().nullable(),
+        action: taskActivityActionSchema,
+        changes: z.record(z.string(), z.unknown()),
+        created_at: z.string(),
+      }),
+    )
+    .max(100_000)
+    .default([]),
   exported_at: z.string().optional(),
 });
 
@@ -350,6 +470,9 @@ export const importResultSchema = z.object({
   imported_relations: z.number().int().nonnegative(),
   imported_shares: z.number().int().nonnegative(),
   imported_memories: z.number().int().nonnegative().default(0),
+  imported_projects: z.number().int().nonnegative().default(0),
+  imported_tasks: z.number().int().nonnegative().default(0),
+  imported_task_activity: z.number().int().nonnegative().default(0),
 });
 
 export const dataTaskStatusSchema = z.enum([
@@ -458,9 +581,15 @@ export const updateNotificationSchema = z.object({
 
 export const appNotificationDtoSchema = z.object({
   name: z.string(),
-  type: z.enum(["memo_comment", "memo_mention", "daily_review"]),
+  type: z.enum([
+    "memo_comment",
+    "memo_mention",
+    "daily_review",
+    "task_overdue",
+  ]),
   status: z.enum(["unread", "archived"]),
-  memo: z.string(),
+  // Task-overdue rows have no memo anchor; memo_snippet carries the title.
+  memo: z.string().nullable(),
   memo_snippet: z.string(),
   create_time: z.string(),
 });
@@ -469,7 +598,23 @@ export type CreateMemoInput = z.infer<typeof createMemoSchema>;
 export type UpdateMemoInput = z.infer<typeof updateMemoSchema>;
 export type ListMemosQuery = z.infer<typeof listMemosQuerySchema>;
 export type MemoStatsQuery = z.infer<typeof memoStatsQuerySchema>;
+/**
+ * The pre-validation shape. `time_zone` and `days` carry Zod defaults, so the
+ * parsed output requires them while a direct in-process caller may omit both —
+ * internal callers pass literals instead of round-tripping through the schema.
+ *
+ * `days` is restated as `number` because `z.coerce.number()` types its input as
+ * `unknown` (it accepts anything `Number()` can parse), and that widening would
+ * otherwise land on every internal caller.
+ */
+export type MemoStatsQueryInput = Omit<
+  z.input<typeof memoStatsQuerySchema>,
+  "days"
+> & {
+  days?: number;
+};
 export type MemoVisibility = z.infer<typeof memoVisibilitySchema>;
+export type MemoSpace = z.infer<typeof memoSpaceSchema>;
 export type MemoState = z.infer<typeof memoStatusSchema>;
 export type MemoOrderBy = z.infer<typeof memoOrderBySchema>;
 export type MemoDto = z.infer<typeof memoDtoSchema>;

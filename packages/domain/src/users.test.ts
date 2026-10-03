@@ -1,25 +1,85 @@
-import type { UserRow } from "@flaremo/db";
-import { applyFlaremoMigrations, createDb, memos, users } from "@flaremo/db";
+import {
+  applyFlaremoMigrations,
+  authUsers,
+  createDb,
+  memos,
+  memoTags,
+  type UserRow,
+  users,
+} from "@flaremo/db";
 import { eq } from "drizzle-orm";
 import { Miniflare } from "miniflare";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { completeOwnerBootstrap, getViewerTeamMembership } from "./auth";
 import { ConflictError, ForbiddenError, ValidationError } from "./errors";
+import { readHourlyCountTotals } from "./memo-hourly-counts";
 import { createMemo } from "./memos";
+import type { TeamViewer } from "./team-permissions";
 import {
   beginFlaremoMemberRemoval,
   createFlaremoMember,
+  createFlaremoMemberWithLink,
   ensureSingleUser,
   finalizeFlaremoMemberRemoval,
+  getDefaultTeam,
   getFlaremoUserById,
+  grantTeamReader,
+  revokeTeamReader,
   updateFlaremoUserEmail,
-  updateFlaremoUserRole,
+  updateTeamMemberRole,
 } from "./users";
 
 let mf: Miniflare;
 let db: ReturnType<typeof createDb>;
 let user: UserRow;
+const OWNER_AUTH_USER_ID = "auth/owner";
 
-describe("updateFlaremoUserEmail", () => {
+async function createTestAuthUser(
+  authUserId: string,
+  email: string,
+  name: string,
+): Promise<void> {
+  const now = new Date();
+  await db.insert(authUsers).values({
+    id: authUserId,
+    email,
+    name,
+    emailVerified: true,
+    image: null,
+    username: email.split("@")[0],
+    displayUsername: name,
+    createdAt: now,
+    updatedAt: now,
+  });
+}
+
+/** Create a member through the real provisioning path (identity, link, team). */
+async function createMember(
+  name: string,
+): Promise<{ id: string; authUserId: string; viewer: TeamViewer }> {
+  const slug = name.toLowerCase().replaceAll(" ", "-");
+  const email = `${slug}@example.com`;
+  const authUserId = `auth/${slug}`;
+  await createTestAuthUser(authUserId, email, name);
+  const member = await createFlaremoMemberWithLink(db, {
+    authUserId,
+    email,
+    name,
+  });
+  const membership = await getViewerTeamMembership(db, authUserId);
+  expect(membership).toMatchObject({ role: "member" });
+  return {
+    id: member.id,
+    authUserId,
+    viewer: {
+      ...member,
+      teamRole: membership?.role,
+      teamOrganizationId: membership?.organizationId,
+    },
+  };
+}
+
+describe("team users", () => {
   beforeEach(async () => {
     mf = new Miniflare({
       script: "export default { fetch() { return new Response('ok') } }",
@@ -34,6 +94,13 @@ describe("updateFlaremoUserEmail", () => {
     user = await ensureSingleUser(db, {
       email: "owner@example.com",
       name: "Owner",
+    });
+    // The bootstrap owner joins the default team through the same path the
+    // worker's setup flow uses.
+    await createTestAuthUser(OWNER_AUTH_USER_ID, "owner@example.com", "Owner");
+    await completeOwnerBootstrap(db, {
+      authUserId: OWNER_AUTH_USER_ID,
+      singleUser: { email: "owner@example.com", name: "Owner" },
     });
   });
 
@@ -71,18 +138,85 @@ describe("updateFlaremoUserEmail", () => {
     expect(updated.email).toBe("owner@example.com");
   });
 
-  it("removes private data while retaining team content and its author", async () => {
-    const member = await createFlaremoMember(db, {
-      email: "member@example.com",
-      name: "Member",
+  it("publishes team memos into the default team and personal memos into none", async () => {
+    const member = await createMember("Member");
+    const team = await getDefaultTeam(db);
+    expect(team).not.toBeNull();
+
+    const teamMemo = await createMemo(db, member.viewer, {
+      content: "team",
+      visibility: "protected",
+      source: "web",
     });
-    const privateMemo = await createMemo(db, member, {
+    expect(teamMemo.teamId).toBe(team?.id);
+
+    const personalMemo = await createMemo(db, member.viewer, {
+      content: "personal",
+      visibility: "private",
+      source: "web",
+    });
+    expect(personalMemo.teamId).toBeNull();
+  });
+
+  it("denies team publishing for readers but keeps personal notes working", async () => {
+    const member = await createMember("Reader");
+    await grantTeamReader(db, {
+      authUserId: member.authUserId,
+      expiresAt: new Date(Date.now() + 86_400_000),
+    });
+    const membership = await getViewerTeamMembership(db, member.authUserId);
+    expect(membership).toMatchObject({ role: "reader" });
+    const reader = { ...member.viewer, teamRole: "reader" as const };
+
+    await expect(
+      createMemo(db, reader, {
+        content: "team",
+        visibility: "protected",
+        source: "web",
+      }),
+    ).rejects.toThrow(ForbiddenError);
+    // Personal notes stay fully available to the read-only seat.
+    const personal = await createMemo(db, reader, {
+      content: "personal",
+      visibility: "private",
+      source: "web",
+    });
+    expect(personal.teamId).toBeNull();
+  });
+
+  it("cuts off access automatically when the reader seat expires", async () => {
+    const member = await createMember("Lapsed");
+    // Grant, then lapse: the past-dated expiry folds the membership out at
+    // the single fail-closed gate (getViewerTeamMembership) — no cron needed.
+    await grantTeamReader(db, {
+      authUserId: member.authUserId,
+      expiresAt: new Date(Date.now() - 1000),
+    });
+    expect(await getViewerTeamMembership(db, member.authUserId)).toBeNull();
+
+    // Renewal from the admin restores access immediately.
+    await grantTeamReader(db, {
+      authUserId: member.authUserId,
+      expiresAt: new Date(Date.now() + 86_400_000),
+    });
+    expect(await getViewerTeamMembership(db, member.authUserId)).toMatchObject({
+      role: "reader",
+    });
+
+    // Revocation removes the membership row entirely.
+    await revokeTeamReader(db, member.authUserId);
+    expect(await getViewerTeamMembership(db, member.authUserId)).toBeNull();
+  });
+
+  it("removes private data and adopts team content into the owner account", async () => {
+    const member = await createMember("Member");
+    const privateMemo = await createMemo(db, member.viewer, {
       content: "private",
       visibility: "private",
       source: "web",
     });
-    const teamMemo = await createMemo(db, member, {
-      content: "team",
+    const teamMemo = await createMemo(db, member.viewer, {
+      content: "team #adopted",
       visibility: "protected",
       source: "web",
     });
@@ -91,37 +225,62 @@ describe("updateFlaremoUserEmail", () => {
     expect(artifacts.memoIds).toEqual([privateMemo.id]);
     expect((await getFlaremoUserById(db, member.id))?.status).toBe("removed");
 
+    // Both memos belong to the member's counter until the removal runs.
+    expect(await readHourlyCountTotals(db, member.id)).toMatchObject({
+      normal: 2,
+    });
+
     await finalizeFlaremoMemberRemoval(db, member.id, artifacts);
-    const rows = await db
+    const adopted = await db
       .select()
       .from(memos)
-      .where(eq(memos.userId, member.id));
-    expect(rows.map((row) => row.id)).toEqual([teamMemo.id]);
+      .where(eq(memos.id, teamMemo.id))
+      .get();
+    expect(adopted).toMatchObject({ userId: "users/owner" });
     expect(await getFlaremoUserById(db, member.id)).toMatchObject({
       name: "Member",
       status: "removed",
     });
+
+    // The private memo was deleted and the team memo was adopted, so the
+    // member's counter must be empty and the owner's must count the adopted
+    // memo. Left to the nightly rebuild, the owner under-reports and the
+    // removed member keeps counting memos that no longer exist.
+    expect(await readHourlyCountTotals(db, member.id)).toMatchObject({
+      normal: 0,
+      activeDays: 0,
+    });
+    expect(await readHourlyCountTotals(db, "users/owner")).toMatchObject({
+      normal: 1,
+    });
+
+    // The adopted memo's tag row has to follow it. `memo_tags.user_id` is
+    // denormalized from the author, and the fast-path tag query filters on it
+    // while `counts` filters on `memos.user_id` — leaving them apart makes the
+    // owner see the adopted memo in `counts` but not in `tags`.
+    const adoptedTag = await db
+      .select()
+      .from(memoTags)
+      .where(eq(memoTags.memoId, teamMemo.id))
+      .get();
+    expect(adoptedTag).toMatchObject({ userId: "users/owner", tag: "adopted" });
   });
 
   it("supports assigning and removing the team administrator role", async () => {
-    const member = await createFlaremoMember(db, {
-      email: "admin@example.com",
-      name: "Admin",
-    });
-    expect((await updateFlaremoUserRole(db, member.id, "admin")).role).toBe(
+    const member = await createMember("Admin");
+    await updateTeamMemberRole(db, member.authUserId, "admin");
+    expect((await getViewerTeamMembership(db, member.authUserId))?.role).toBe(
       "admin",
     );
-    expect((await updateFlaremoUserRole(db, member.id, "member")).role).toBe(
+    await updateTeamMemberRole(db, member.authUserId, "member");
+    expect((await getViewerTeamMembership(db, member.authUserId))?.role).toBe(
       "member",
     );
   });
 
   it("removes a second administrator while the owner stays active", async () => {
-    const secondAdmin = await createFlaremoMember(db, {
-      email: "second-admin@example.com",
-      name: "Second Admin",
-    });
-    await updateFlaremoUserRole(db, secondAdmin.id, "admin");
+    const secondAdmin = await createMember("Second Admin");
+    await updateTeamMemberRole(db, secondAdmin.authUserId, "admin");
 
     const artifacts = await beginFlaremoMemberRemoval(db, secondAdmin.id);
     await finalizeFlaremoMemberRemoval(db, secondAdmin.id, artifacts);
@@ -132,19 +291,20 @@ describe("updateFlaremoUserEmail", () => {
   });
 
   it("rejects demoting the last active administrator", async () => {
-    const lastAdmin = await createFlaremoMember(db, {
-      email: "last-admin@example.com",
-      name: "Last Admin",
-    });
-    await updateFlaremoUserRole(db, lastAdmin.id, "admin");
-    // Simulate a degraded deployment whose owner row is no longer an active
-    // administrator; the guard must then keep `lastAdmin` in place.
+    const lastAdmin = await createMember("Last Admin");
+    await updateTeamMemberRole(db, lastAdmin.authUserId, "admin");
+    // Simulate a degraded deployment whose owner row no longer holds an
+    // administrator membership; the guard must then keep `lastAdmin` in place.
     await db
       .update(users)
       .set({ status: "removed" })
       .where(eq(users.id, user.id));
 
-    const error = await updateFlaremoUserRole(db, lastAdmin.id, "member").then(
+    const error = await updateTeamMemberRole(
+      db,
+      lastAdmin.authUserId,
+      "member",
+    ).then(
       () => null,
       (thrown: unknown) => thrown,
     );
@@ -152,16 +312,15 @@ describe("updateFlaremoUserEmail", () => {
     expect((error as Error).message).toBe(
       "The last active administrator cannot be changed.",
     );
-    expect((await getFlaremoUserById(db, lastAdmin.id))?.role).toBe("admin");
+    expect(
+      (await getViewerTeamMembership(db, lastAdmin.authUserId))?.role,
+    ).toBe("admin");
     expect((await getFlaremoUserById(db, lastAdmin.id))?.status).toBe("active");
   });
 
   it("rejects removing the last active administrator", async () => {
-    const lastAdmin = await createFlaremoMember(db, {
-      email: "last-admin@example.com",
-      name: "Last Admin",
-    });
-    await updateFlaremoUserRole(db, lastAdmin.id, "admin");
+    const lastAdmin = await createMember("Last Admin");
+    await updateTeamMemberRole(db, lastAdmin.authUserId, "admin");
     await db
       .update(users)
       .set({ status: "removed" })
@@ -179,7 +338,11 @@ describe("updateFlaremoUserEmail", () => {
   });
 
   it("rejects demoting or removing the owner account", async () => {
-    const roleError = await updateFlaremoUserRole(db, user.id, "member").then(
+    const roleError = await updateTeamMemberRole(
+      db,
+      OWNER_AUTH_USER_ID,
+      "member",
+    ).then(
       () => null,
       (thrown: unknown) => thrown,
     );
@@ -188,7 +351,10 @@ describe("updateFlaremoUserEmail", () => {
       "The owner role cannot be changed.",
     );
 
-    const removalError = await beginFlaremoMemberRemoval(db, user.id).then(
+    const removalError = await beginFlaremoMemberRemoval(
+      db,
+      "users/owner",
+    ).then(
       () => null,
       (thrown: unknown) => thrown,
     );
@@ -198,6 +364,6 @@ describe("updateFlaremoUserEmail", () => {
     );
 
     const owner = await getFlaremoUserById(db, user.id);
-    expect(owner).toMatchObject({ role: "owner", status: "active" });
+    expect(owner).toMatchObject({ status: "active" });
   });
 });

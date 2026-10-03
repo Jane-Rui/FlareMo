@@ -1,17 +1,26 @@
-import { FootprintsIcon, Loader2Icon, ShuffleIcon } from "lucide-react";
+import { Link } from "@tanstack/react-router";
+import {
+  FootprintsIcon,
+  Loader2Icon,
+  PlusIcon,
+  ShuffleIcon,
+} from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getRandomWalkMemo, getWalkNextMemo } from "@/api";
 import { MemoSnapshotCard } from "@/components/memo-snapshot-card";
-import { SubpageHeader } from "@/components/subpage-header";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import {
   Empty,
+  EmptyContent,
   EmptyDescription,
   EmptyHeader,
+  EmptyMedia,
   EmptyTitle,
 } from "@/components/ui/empty";
 import { Skeleton } from "@/components/ui/skeleton";
+import { WorkspaceLayout } from "@/components/workspace/workspace-layout";
+import { WorkspacePageHeader } from "@/components/workspace/workspace-page-header";
 import { type TranslationKey, useI18n } from "@/i18n";
 import { formatMemoTime } from "@/lib/memo";
 import { cn } from "@/lib/utils";
@@ -93,16 +102,28 @@ export function RandomWalkPage() {
   const step = steps[cursor];
 
   return (
-    <div className="min-h-svh bg-background px-4 py-5 sm:py-8">
-      <main className="mx-auto flex w-full max-w-[640px] flex-col gap-4">
-        <SubpageHeader />
-
-        <div className="px-1">
-          <h1 className="font-heading text-xl font-semibold">
-            {t("nav.randomWalk")}
-          </h1>
-        </div>
-
+    <WorkspaceLayout
+      header={({
+        sidebarCollapsed,
+        toggleSidebarCollapsed,
+        mobileSheetOpen,
+        setMobileSheetOpen,
+        explorer,
+      }) => (
+        <WorkspacePageHeader
+          explorer={explorer}
+          icon={
+            <FootprintsIcon className="size-4 shrink-0 text-brand-600 dark:text-brand-400" />
+          }
+          mobileSheetOpen={mobileSheetOpen}
+          setMobileSheetOpen={setMobileSheetOpen}
+          sidebarCollapsed={sidebarCollapsed}
+          title={t("nav.randomWalk")}
+          toggleSidebarCollapsed={toggleSidebarCollapsed}
+        />
+      )}
+    >
+      <div className="flex flex-col gap-4 py-2">
         {finished ? (
           <WalkPostcard onRestart={restart} pending={pending} steps={steps} />
         ) : (
@@ -129,13 +150,41 @@ export function RandomWalkPage() {
               </Empty>
             )}
             {!pending && !loadError && steps.length === 0 && (
-              <Empty className="min-h-72 border">
+              <Empty className="min-h-72 border border-border/60 bg-card/50 motion-safe:animate-rise">
                 <EmptyHeader>
+                  <EmptyMedia
+                    className="bg-accent text-accent-foreground"
+                    variant="icon"
+                  >
+                    <FootprintsIcon className="size-5" />
+                  </EmptyMedia>
                   <EmptyTitle>{t("review.walkEmptyTitle")}</EmptyTitle>
                   <EmptyDescription>
                     {t("review.walkEmptyDescription")}
                   </EmptyDescription>
                 </EmptyHeader>
+                <EmptyContent>
+                  <Button
+                    render={
+                      <Link
+                        search={{
+                          compose: true,
+                          q: undefined,
+                          tag: undefined,
+                          view: undefined,
+                          space: undefined,
+                          untagged: undefined,
+                        }}
+                        to="/"
+                      />
+                    }
+                    size="sm"
+                    variant="outline"
+                  >
+                    <PlusIcon className="size-4" data-icon="inline-start" />
+                    {t("review.writeFirstMemo")}
+                  </Button>
+                </EmptyContent>
               </Empty>
             )}
             {step && (
@@ -152,7 +201,7 @@ export function RandomWalkPage() {
                   >
                     {pending ? (
                       <Loader2Icon
-                        className="animate-spin"
+                        className="motion-safe:animate-spin"
                         data-icon="inline-start"
                       />
                     ) : (
@@ -220,8 +269,8 @@ export function RandomWalkPage() {
             )}
           </>
         )}
-      </main>
-    </div>
+      </div>
+    </WorkspaceLayout>
   );
 }
 
@@ -240,7 +289,7 @@ function WalkPostcard({
   const end = summary.latest ? spanPoint(summary.latest, t) : null;
 
   return (
-    <Card className="border-flame-300/40 ring-flame-400/20 dark:border-flame-400/25">
+    <Card className="border-brand-300/40 ring-brand-400/20 dark:border-brand-400/25">
       <CardContent className="flex flex-col items-center gap-3 py-8 text-center">
         <p className="text-xs tracking-[0.3em] text-muted-foreground uppercase">
           {t("review.postcardTitle")}
