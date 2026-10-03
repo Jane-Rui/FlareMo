@@ -2,10 +2,9 @@ import {
   type FlareMoDb,
   type MemosSseEventRow,
   memosSseEvents,
-  type UserRow,
 } from "@flaremo/db";
-import { and, asc, gt, sql } from "drizzle-orm";
-import { isActiveTeamMember } from "./team-permissions";
+import { and, asc, gt, inArray, lt, sql } from "drizzle-orm";
+import { isActiveTeamMember, type TeamViewer } from "./team-permissions";
 
 export const MEMOS_SSE_EVENT_TYPES = [
   "memo.created",
@@ -23,6 +22,8 @@ export type NewMemosSseEvent = {
   name: string;
   parent?: string;
   visibility: "private" | "protected" | "public";
+  /** Owning organization; required so protected events stay org-scoped. */
+  teamId?: string | null;
   creatorId: string;
   createdAt: string;
 };
@@ -38,6 +39,7 @@ export function insertMemosSseEvent(db: FlareMoDb, event: NewMemosSseEvent) {
     name: event.name,
     parent: event.parent ?? null,
     visibility: event.visibility,
+    teamId: event.teamId ?? null,
     creatorId: event.creatorId,
     createdAt: event.createdAt,
   });
@@ -74,11 +76,40 @@ export async function listMemosSseEvents(
     .limit(safeLimit);
 }
 
+/**
+ * Delivery mirrors the memo read boundary: private events go only to their
+ * creator, protected events only to members of the event's organization, and
+ * public events to any active member. A protected event without a team id is
+ * undeliverable (fail-closed for legacy rows written before the column).
+ */
 export function canReceiveMemosSseEvent(
   event: MemosSseEventRow,
-  user: UserRow,
+  user: TeamViewer,
 ) {
   if (!isActiveTeamMember(user)) return false;
-  if (event.visibility !== "private") return true;
-  return event.creatorId === user.id;
+  if (event.visibility === "private") return event.creatorId === user.id;
+  if (event.visibility === "protected") {
+    return Boolean(event.teamId && event.teamId === user.teamOrganizationId);
+  }
+  return true;
+}
+
+/** SSE event rows older than this are pruned by the daily cron. Clients
+ * reconnect with Last-Event-ID for at most one missed session, so a week of
+ * replay is generous; the table is otherwise the only outbox that grew
+ * without bound. */
+export const MEMOS_SSE_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
+
+export async function pruneMemosSseEvents(db: FlareMoDb, before: Date) {
+  const cutoff = before.toISOString();
+  // Bounded chunk so the cron sweep never performs one giant delete.
+  const stale = await db
+    .select({ id: memosSseEvents.id })
+    .from(memosSseEvents)
+    .where(lt(memosSseEvents.createdAt, cutoff))
+    .limit(1000);
+  if (stale.length === 0) return 0;
+  const ids = stale.map((row) => row.id);
+  await db.delete(memosSseEvents).where(inArray(memosSseEvents.id, ids));
+  return ids.length;
 }

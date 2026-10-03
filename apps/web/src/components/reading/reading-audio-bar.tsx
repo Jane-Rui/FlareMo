@@ -18,13 +18,14 @@ export function ReadingAudioBar({ className }: { className?: string }) {
   const audio = useReadingAudio();
   if (!audio?.track) return null;
 
-  const { track, playing, currentTime, duration, rate, follow } = audio;
+  const { track, playing, currentTime, duration, rate, follow, errored } =
+    audio;
   const max = duration > 0 ? duration : 1;
 
   return (
     <div
       className={cn(
-        "sticky top-2 z-20 flex flex-col gap-1.5 rounded-xl border border-border/60 bg-card/95 px-3 py-2.5 shadow-sm backdrop-blur-md",
+        "glass sticky top-2 z-20 flex flex-col gap-1.5 rounded-xl px-3 py-2.5",
         className,
       )}
     >
@@ -50,7 +51,9 @@ export function ReadingAudioBar({ className }: { className?: string }) {
           aria-label={t("reading.seek")}
           className="mx-1 min-w-0 flex-1"
           max={max}
-          onValueChange={([value]) => audio.seek(value)}
+          onValueChange={(value) =>
+            audio.seek(Array.isArray(value) ? value[0] : value)
+          }
           step={1}
           value={[Math.min(currentTime, max)]}
         />
@@ -70,7 +73,7 @@ export function ReadingAudioBar({ className }: { className?: string }) {
           ))}
           <Toggle
             aria-label={t("reading.follow")}
-            className="h-6 px-2 text-[0.7rem]"
+            className="h-6 px-2 text-xs"
             onPressedChange={audio.setFollow}
             pressed={follow}
             size="sm"
@@ -79,6 +82,12 @@ export function ReadingAudioBar({ className }: { className?: string }) {
           </Toggle>
         </div>
       </div>
+
+      {errored && (
+        <p className="text-xs text-destructive">
+          {t("reading.audioUnavailable")}
+        </p>
+      )}
 
       {/* The active file with its download entry — shown even for a single
           track, which is the common case and the only place the audio file
@@ -99,7 +108,7 @@ export function ReadingAudioBar({ className }: { className?: string }) {
               className={cn(
                 "max-w-56 truncate rounded-md px-2 py-0.5 text-[0.7rem] transition-colors",
                 item.id === track.id
-                  ? "bg-flame-50 text-flame-700 dark:bg-flame-400/12 dark:text-flame-200"
+                  ? "bg-brand-50 text-brand-700 dark:bg-brand-400/12 dark:text-brand-200"
                   : "bg-muted text-muted-foreground hover:text-foreground",
               )}
               key={item.id}

@@ -5,9 +5,20 @@ import {
   memosWebhookDeliveries,
   memosWebhookEvents,
   memosWebhooks,
+  reactions,
   type UserRow,
 } from "@flaremo/db";
-import { and, asc, eq, isNotNull, isNull, lt, lte, or } from "drizzle-orm";
+import {
+  and,
+  asc,
+  eq,
+  inArray,
+  isNotNull,
+  isNull,
+  lt,
+  lte,
+  or,
+} from "drizzle-orm";
 
 export const MEMOS_WEBHOOK_ACTIVITY_TYPES = [
   "memos.memo.created",
@@ -103,7 +114,7 @@ export async function dispatchMemosWebhookOutbox(
   await Promise.all(
     claimedDeliveries.map(async ({ item, delivery }) => {
       try {
-        await postWebhook(item, delivery, now);
+        await postWebhook(db, item, delivery, now);
         await markDeliveryDelivered(db, delivery.id, nowIso);
       } catch (error) {
         await markDeliveryFailed(
@@ -135,25 +146,24 @@ export async function pruneMemosWebhookOutbox(db: FlareMoDb, before: Date) {
     )
     .limit(100);
   if (events.length === 0) return;
-  for (const event of events) {
-    const unfinished = await db
-      .select({ id: memosWebhookDeliveries.id })
-      .from(memosWebhookDeliveries)
-      .where(
-        and(
-          eq(memosWebhookDeliveries.eventId, event.id),
-          or(
-            eq(memosWebhookDeliveries.status, "pending"),
-            eq(memosWebhookDeliveries.status, "sending"),
-          ),
-        ),
-      )
-      .limit(1);
-    if (unfinished.length > 0) continue;
-    await db
-      .delete(memosWebhookEvents)
-      .where(eq(memosWebhookEvents.id, event.id));
-  }
+  const eventIds = events.map((event) => event.id);
+  // One lookup for every event that still owns a live delivery, instead of a
+  // LIMIT 1 probe per event. Only events absent from this set are prunable.
+  const unfinished = await db
+    .select({ eventId: memosWebhookDeliveries.eventId })
+    .from(memosWebhookDeliveries)
+    .where(
+      and(
+        inArray(memosWebhookDeliveries.eventId, eventIds),
+        inArray(memosWebhookDeliveries.status, ["pending", "sending"]),
+      ),
+    );
+  const blocked = new Set(unfinished.map((row) => row.eventId));
+  const prunableIds = eventIds.filter((id) => !blocked.has(id));
+  if (prunableIds.length === 0) return;
+  await db
+    .delete(memosWebhookEvents)
+    .where(inArray(memosWebhookEvents.id, prunableIds));
 }
 
 async function expandPendingEvents(db: FlareMoDb, nowIso: string) {
@@ -164,21 +174,29 @@ async function expandPendingEvents(db: FlareMoDb, nowIso: string) {
     .orderBy(asc(memosWebhookEvents.id))
     .limit(MAX_EVENTS_PER_SWEEP);
 
-  for (const event of events) {
-    const webhooks = await db
-      .select()
-      .from(memosWebhooks)
-      .where(
-        and(
-          eq(memosWebhooks.userId, event.receiverId),
-          // A webhook created after an event must not receive historical
-          // events. A deleted webhook naturally loses its delivery row.
-          lte(memosWebhooks.createdAt, event.createdAt),
-        ),
-      );
+  // Webhooks used to be looked up once per event; the sweep is bounded so a
+  // single inArray fetch over the distinct receivers covers every event, and
+  // the per-event createdAt boundary is applied while filtering in memory.
+  const receiverIds = [...new Set(events.map((event) => event.receiverId))];
+  const receiverWebhooks =
+    receiverIds.length > 0
+      ? await db
+          .select()
+          .from(memosWebhooks)
+          .where(inArray(memosWebhooks.userId, receiverIds))
+      : [];
 
-    for (const webhook of webhooks) {
-      await db
+  for (const event of events) {
+    // A webhook created after an event must not receive historical events. A
+    // deleted webhook naturally loses its delivery row.
+    const webhooks = receiverWebhooks.filter(
+      (webhook) =>
+        webhook.userId === event.receiverId &&
+        webhook.createdAt <= event.createdAt,
+    );
+
+    const statements: unknown[] = webhooks.map((webhook) =>
+      db
         .insert(memosWebhookDeliveries)
         .values({
           eventId: event.id,
@@ -197,18 +215,20 @@ async function expandPendingEvents(db: FlareMoDb, nowIso: string) {
             memosWebhookDeliveries.eventId,
             memosWebhookDeliveries.webhookId,
           ],
-        });
-    }
-
-    await db
-      .update(memosWebhookEvents)
-      .set({ expandedAt: nowIso })
-      .where(
-        and(
-          eq(memosWebhookEvents.id, event.id),
-          isNull(memosWebhookEvents.expandedAt),
+        }),
+    );
+    statements.push(
+      db
+        .update(memosWebhookEvents)
+        .set({ expandedAt: nowIso })
+        .where(
+          and(
+            eq(memosWebhookEvents.id, event.id),
+            isNull(memosWebhookEvents.expandedAt),
+          ),
         ),
-      );
+    );
+    await db.batch(statements as unknown as Parameters<FlareMoDb["batch"]>[0]);
   }
 }
 
@@ -284,12 +304,17 @@ async function claimDelivery(
 }
 
 async function postWebhook(
+  db: FlareMoDb,
   item: PendingDelivery,
   delivery: typeof memosWebhookDeliveries.$inferSelect,
   now: Date,
 ) {
+  // The event snapshot is stored at write time, before reactions land; fill
+  // the reactions field at delivery time so subscribers receive the real
+  // reaction list instead of a constant empty array.
+  const bodyPayload = await hydrateWebhookReactions(db, item.event.body);
   const body = JSON.stringify({
-    ...item.event.body,
+    ...bodyPayload,
     url: item.webhook.url,
   });
   const messageId = `msg_${item.event.id}_${delivery.id}`;
@@ -404,6 +429,47 @@ async function markDeliveryFailed(
     .where(eq(memosWebhookDeliveries.id, delivery.id));
 }
 
+/**
+ * Fill `body.memo.reactions` with the memo's current reaction list. The event
+ * snapshot is written before reactions change, so the delivery time is the
+ * only point that can show a truthful list.
+ */
+async function hydrateWebhookReactions(
+  db: FlareMoDb,
+  body: unknown,
+): Promise<Record<string, unknown>> {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return {};
+  const source = body as Record<string, unknown>;
+  const memo = source.memo as
+    | { name?: unknown; reactions?: unknown }
+    | undefined;
+  if (
+    !memo ||
+    typeof memo.name !== "string" ||
+    !Array.isArray(memo.reactions)
+  ) {
+    return source;
+  }
+  const memoId = memo.name;
+  const rows = await db
+    .select({
+      reactionType: reactions.reactionType,
+      creatorId: reactions.creatorId,
+    })
+    .from(reactions)
+    .where(eq(reactions.contentId, memoId));
+  return {
+    ...source,
+    memo: {
+      ...memo,
+      reactions: rows.map((row) => ({
+        reaction_type: row.reactionType,
+        creator: row.creatorId,
+      })),
+    },
+  };
+}
+
 function webhookFailureMessage(error: unknown) {
   if (error instanceof DOMException && error.name === "AbortError") {
     return "timeout";
@@ -414,6 +480,10 @@ function webhookFailureMessage(error: unknown) {
   if (error instanceof Error && error.message === "remote_code_not_zero") {
     return error.message;
   }
+  // Keep a bounded excerpt of the real error so dead-letter rows are
+  // diagnosable instead of a bare "network_error" bucket.
+  const detail = error instanceof Error ? error.message : String(error);
+  if (detail) return `network_error: ${detail.slice(0, 180)}`;
   return "network_error";
 }
 
@@ -424,7 +494,14 @@ function memoToWebhookDto(memo: WebhookMemoSnapshot, creator: UserRow) {
     : [];
   return {
     name: memo.id,
-    state: memo.status === "normal" ? "NORMAL" : "ARCHIVED",
+    state:
+      memo.status === "normal"
+        ? "NORMAL"
+        : memo.status === "archived"
+          ? "ARCHIVED"
+          : memo.status === "trashed"
+            ? "TRASHED"
+            : "DELETED",
     creator: creator.id,
     createTime: memo.createdAt,
     updateTime: memo.updatedAt,

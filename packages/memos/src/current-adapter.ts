@@ -7,6 +7,7 @@ import type {
   ShortcutRow,
   UserRow,
 } from "@flaremo/db";
+import { memosWireRole } from "@flaremo/domain";
 
 type CurrentMemoRelationRow = {
   memoId: string;
@@ -83,17 +84,6 @@ export function currentMemosToListResponse(input: {
     ),
     ...(input.nextPageToken ? { nextPageToken: input.nextPageToken } : {}),
   };
-}
-
-export function currentMemoCommentsToListResponse(input: {
-  memos: MemoRow[];
-  user: UserRow;
-  attachmentsByMemo?: ReadonlyMap<string, AttachmentRow[]>;
-  reactionsByMemo?: ReadonlyMap<string, ReactionRow[]>;
-  parentsByMemo?: ReadonlyMap<string, string>;
-  nextPageToken?: string;
-}) {
-  return currentMemosToListResponse(input);
 }
 
 export function currentAttachmentToDto(attachment: AttachmentRow) {
@@ -183,7 +173,7 @@ export function currentRelationToDto(
 export function currentUserToDto(user: UserRow, authUser?: AuthUserRow | null) {
   return {
     name: user.id,
-    role: user.role === "member" ? "USER" : "ADMIN",
+    role: memosWireRole(user),
     username: authUser?.username ?? user.id.replace(/^users\//, ""),
     email: authUser?.email ?? user.email,
     displayName: user.name,
@@ -197,7 +187,7 @@ export function currentUserToDto(user: UserRow, authUser?: AuthUserRow | null) {
 export function publicUserToDto(user: UserRow, username?: string) {
   return {
     name: user.id,
-    role: user.role === "member" ? "USER" : "ADMIN",
+    role: memosWireRole(user),
     username: username ?? user.id.replace(/^users\//, ""),
     displayName: user.name,
     ...(user.avatarUrl ? { avatarUrl: user.avatarUrl } : {}),
@@ -228,22 +218,6 @@ export function currentRelationType(
   value: "reference" | "comment",
 ): "REFERENCE" | "COMMENT" {
   return value === "comment" ? "COMMENT" : "REFERENCE";
-}
-
-export function legacyMemoState(
-  value: unknown,
-): "normal" | "archived" | "trashed" | "deleted" | undefined {
-  if (value === "NORMAL") return "normal";
-  if (value === "ARCHIVED") return "archived";
-  if (
-    value === "normal" ||
-    value === "archived" ||
-    value === "trashed" ||
-    value === "deleted"
-  ) {
-    return value;
-  }
-  return undefined;
 }
 
 function currentProperty(value: unknown) {

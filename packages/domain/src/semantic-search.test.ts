@@ -1,4 +1,3 @@
-import type { UserRow } from "@flaremo/db";
 import { applyFlaremoMigrations, createDb, memos } from "@flaremo/db";
 import { eq } from "drizzle-orm";
 import { Miniflare } from "miniflare";
@@ -10,13 +9,15 @@ import type {
   VectorIndexMatch,
   VectorIndexVector,
 } from "./embedding";
+import { memoTeamNamespace, memoUserNamespace } from "./embedding";
 import { createMemo } from "./memos";
 import { semanticSearchMemos } from "./semantic-search";
-import { createFlaremoMember, ensureSingleUser } from "./users";
+import type { TeamViewer } from "./team-permissions";
+import { createTeamMember, ensureTeamOwner } from "./test-support";
 
 let mf: Miniflare;
 let db: ReturnType<typeof createDb>;
-let user: UserRow;
+let user: TeamViewer;
 
 class FakeVectorIndex implements VectorIndex {
   vectors = new Map<string, VectorIndexVector>();
@@ -35,6 +36,12 @@ class FakeVectorIndex implements VectorIndex {
   }
   async upsert(vectors: VectorIndexVector[]) {
     for (const vector of vectors) this.vectors.set(vector.id, vector);
+  }
+  async getByIds(ids: string[]): Promise<VectorIndexVector[]> {
+    return ids.flatMap((id) => {
+      const vector = this.vectors.get(id);
+      return vector ? [vector] : [];
+    });
   }
   async deleteByIds(ids: string[]) {
     for (const id of ids) this.vectors.delete(id);
@@ -64,10 +71,7 @@ describe("semanticSearchMemos", () => {
     const database = await mf.getD1Database("DB");
     db = createDb(database);
     await applyFlaremoMigrations(database);
-    user = await ensureSingleUser(db, {
-      email: "owner@example.com",
-      name: "Owner",
-    });
+    user = await ensureTeamOwner(db);
   });
 
   afterEach(async () => {
@@ -136,18 +140,51 @@ describe("semanticSearchMemos", () => {
     await semanticSearchMemos(
       db,
       user,
-      { provider, index, namespace: user.id },
+      { provider, index, namespaces: [user.id] },
       "租户",
       10,
     );
     expect(index.lastNamespace).toBe(user.id);
   });
 
-  it("returns team memos but never another member's private memo", async () => {
-    const member = await createFlaremoMember(db, {
-      email: "member@example.com",
-      name: "Member",
+  it("queries each namespace bucket and merges matches by best score", async () => {
+    const a = await createMemo(db, user, {
+      content: "个人笔记",
+      visibility: "private",
+      source: "web",
     });
+    const b = await createMemo(db, user, {
+      content: "团队笔记",
+      visibility: "protected",
+      source: "web",
+    });
+    const index = new FakeVectorIndex();
+    index.matches = [
+      { id: `${b.id}#chunks/0`, score: 0.7 },
+      { id: `${a.id}#chunks/0`, score: 0.9 },
+    ];
+
+    const hits = await semanticSearchMemos(
+      db,
+      user,
+      {
+        provider,
+        index,
+        namespaces: [memoUserNamespace(user.id), memoTeamNamespace()],
+      },
+      "笔记",
+      10,
+    );
+    expect(hits.map((hit) => hit.id)).toEqual([a.id, b.id]);
+    // Both partitions are scanned; no implicit pool query.
+    expect(index.namespaces).toEqual([
+      memoUserNamespace(user.id),
+      memoTeamNamespace(),
+    ]);
+  });
+
+  it("returns team memos but never another member's private memo", async () => {
+    const member = await createTeamMember(db, "Member");
     const privateMemo = await createMemo(db, user, {
       content: "owner private",
       visibility: "private",
@@ -173,8 +210,8 @@ describe("semanticSearchMemos", () => {
     );
 
     expect(hits).toEqual([{ id: teamMemo.id, score: 0.9 }]);
-    // Memo vectors share one namespace: a single default-namespace query
-    // covers every author.
+    // Default (no explicit buckets) keeps a single pool-style query, matching
+    // legacy deployments that have not adopted the partitioned layout.
     expect(index.namespaces).toEqual([]);
     expect(index.lastNamespace).toBeUndefined();
   });

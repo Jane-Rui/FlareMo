@@ -2,6 +2,8 @@ import {
   DEFAULT_EMBEDDING_DIMENSIONS,
   DEFAULT_EMBEDDING_MODEL,
   type EmbeddingProvider,
+  memoTeamNamespace,
+  memoUserNamespace,
   type VectorIndex,
   type VectorIndexInfo,
   type VectorIndexVector,
@@ -54,6 +56,29 @@ export function createVectorIndex(
     kind === "memo" ? env.VECTORIZE_MEMOS : env.VECTORIZE_MEMORIES;
   if (!binding) return null;
   return new CloudflareVectorIndex(binding);
+}
+
+/**
+ * The memo vector partitions a caller's semantic search scans. Always the
+ * author's personal namespace; the shared team namespace joins when the
+ * deployment runs the team layout (default) — `solo` deployments skip it
+ * entirely. A space narrows the scan to that space's namespaces only. The D1
+ * `memoReadScope` re-check stays the authorization boundary regardless of
+ * what is scanned.
+ */
+export function memoSearchNamespaces(
+  env: FlareMoEnv,
+  user: { id: string },
+  space?: "personal" | "team",
+): string[] | undefined {
+  const layout = (env.FLAREMO_VECTORIZE_TEAM_LAYOUT ?? "team").trim();
+  const personal = memoUserNamespace(user.id);
+  // Solo deployments index everything in the user namespace, so a team
+  // space scan still has to scan it.
+  if (layout === "solo") return [personal];
+  if (space === "personal") return [personal];
+  if (space === "team") return [memoTeamNamespace()];
+  return [personal, memoTeamNamespace()];
 }
 
 class WorkersAiEmbeddingProvider implements EmbeddingProvider {
@@ -120,7 +145,6 @@ class HttpEmbeddingProvider implements EmbeddingProvider {
 
 class CloudflareVectorIndex implements VectorIndex {
   constructor(private readonly index: VectorizeIndex) {}
-
   async query(vector: number[], topK: number, namespace?: string) {
     const result = await this.index.query(vector, {
       topK,
@@ -149,9 +173,30 @@ class CloudflareVectorIndex implements VectorIndex {
     );
   }
 
+  async getByIds(ids: string[]): Promise<VectorIndexVector[]> {
+    if (ids.length === 0) return [];
+    const found: VectorIndexVector[] = [];
+    // Vectorize caps id-list operations at 100 ids per call.
+    for (let offset = 0; offset < ids.length; offset += 100) {
+      const batch = await this.index.getByIds(ids.slice(offset, offset + 100));
+      for (const vector of batch) {
+        found.push({
+          id: vector.id,
+          values: Array.from(vector.values ?? []),
+          metadata: (vector.metadata ?? {}) as Record<string, unknown>,
+          ...(vector.namespace ? { namespace: vector.namespace } : {}),
+        });
+      }
+    }
+    return found;
+  }
+
   async deleteByIds(ids: string[]) {
     if (ids.length === 0) return;
-    await this.index.deleteByIds(ids);
+    // Vectorize caps id-list operations at 100 ids per call.
+    for (let offset = 0; offset < ids.length; offset += 100) {
+      await this.index.deleteByIds(ids.slice(offset, offset + 100));
+    }
   }
 
   async describe(): Promise<VectorIndexInfo> {

@@ -1,15 +1,38 @@
+import { DirectionProvider } from "@base-ui/react/direction-provider";
+import { type QueryClient, useQueryClient } from "@tanstack/react-query";
 import {
   createRoute,
   createRouter,
   RouterProvider,
 } from "@tanstack/react-router";
 import { lazy, Suspense } from "react";
+import {
+  getDailyReview,
+  getMemoContext,
+  getRelatedMemos,
+  listArticles,
+  listMemories,
+  listProjects,
+  listTasks,
+} from "@/api";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { isRtlLocale, useI18n } from "@/i18n";
+import { todayKey } from "@/lib/calendar-date";
+import { queryKeys } from "@/lib/query-keys";
 import { AuthenticatedRoute } from "@/routes/authenticated-route";
 import { indexRoute } from "@/routes/index-route";
 import { rootRoute } from "@/routes/root-route";
 import { RouteLoading } from "@/routes/route-loading";
+
+/**
+ * Route loaders warm query caches without ever blocking navigation: a failed
+ * or slow fetch must not turn into a broken route, so the promise is fired
+ * and forgotten. The component's useQuery joins the in-flight request.
+ */
+function warmQuery(promise: Promise<unknown>) {
+  void promise.catch(() => undefined);
+}
 
 const MemoDetailPage = lazy(() =>
   import("@/pages/memo-detail-page").then((module) => ({
@@ -81,19 +104,29 @@ const MemoryPage = lazy(() =>
     default: module.MemoryPage,
   })),
 );
+const TeamProjectsPage = lazy(() =>
+  import("@/pages/team-projects-page").then((module) => ({
+    default: module.TeamProjectsPage,
+  })),
+);
 const ProjectsPage = lazy(() =>
   import("@/pages/projects-page").then((module) => ({
     default: module.ProjectsPage,
   })),
 );
-const CalendarPage = lazy(() =>
-  import("@/pages/calendar-page").then((module) => ({
-    default: module.CalendarPage,
-  })),
-);
 const CapturePage = lazy(() =>
   import("@/pages/capture-page").then((module) => ({
     default: module.CapturePage,
+  })),
+);
+const ArticlesPage = lazy(() =>
+  import("@/pages/articles-page").then((module) => ({
+    default: module.ArticlesPage,
+  })),
+);
+const ArticleEditorPage = lazy(() =>
+  import("@/pages/article-editor-page").then((module) => ({
+    default: module.ArticleEditorPage,
   })),
 );
 
@@ -127,6 +160,23 @@ const memoRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/memo/$memoId",
   component: MemoDetailRoutePage,
+  // Intent preload already warms the JS chunk; this warms the data so the
+  // page (hover-prefetched from memo cards, cold on direct visits) paints
+  // with content on the first render instead of a full-page skeleton.
+  loader: ({ context, params }) => {
+    warmQuery(
+      context.queryClient.ensureQueryData({
+        queryKey: ["memo-context", params.memoId],
+        queryFn: () => getMemoContext(params.memoId),
+      }),
+    );
+    warmQuery(
+      context.queryClient.ensureQueryData({
+        queryKey: ["memo-related", params.memoId],
+        queryFn: () => getRelatedMemos(params.memoId),
+      }),
+    );
+  },
 });
 
 function LoginRoutePage() {
@@ -302,6 +352,16 @@ const dailyReviewRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/review/daily",
   component: DailyReviewRoutePage,
+  loader: ({ context }) => {
+    const today = todayKey();
+    const tzOffset = -new Date().getTimezoneOffset();
+    warmQuery(
+      context.queryClient.ensureQueryData({
+        queryKey: ["daily-review", today, tzOffset],
+        queryFn: () => getDailyReview(today, tzOffset),
+      }),
+    );
+  },
 });
 
 function RandomWalkRoutePage() {
@@ -334,6 +394,14 @@ const memoryRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/memory",
   component: MemoryRoutePage,
+  loader: ({ context }) => {
+    warmQuery(
+      context.queryClient.ensureQueryData({
+        queryKey: ["memories", "list"],
+        queryFn: () => listMemories(),
+      }),
+    );
+  },
 });
 
 function ProjectsRoutePage() {
@@ -350,17 +418,77 @@ const projectsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/projects",
   component: ProjectsRoutePage,
+  loader: ({ context }) => {
+    warmQuery(
+      context.queryClient.ensureQueryData({
+        queryKey: ["projects"],
+        queryFn: () => listProjects(),
+      }),
+    );
+    // Same key as the board's default all-tasks view and the mini calendar.
+    warmQuery(
+      context.queryClient.ensureQueryData({
+        queryKey: queryKeys.tasks.all,
+        queryFn: () => listTasks(),
+      }),
+    );
+  },
 });
 
-function CalendarRoutePage() {
+function TeamProjectsRoutePage() {
   return (
     <AuthenticatedRoute>
       <Suspense fallback={<RouteLoading />}>
-        <CalendarPage />
+        <TeamProjectsPage />
       </Suspense>
     </AuthenticatedRoute>
   );
 }
+
+const teamProjectsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/team-projects",
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): {
+    project?: string;
+    edit?: boolean;
+    new?: string;
+    view?: string;
+    member?: string;
+    phase?: string;
+    q?: string;
+    owner?: string;
+    group?: string;
+  } => {
+    const value = (key: string) => {
+      const raw = search[key];
+      return typeof raw === "string" || typeof raw === "number"
+        ? String(raw)
+        : undefined;
+    };
+    return {
+      project: value("project"),
+      // Only ever emit `edit` when it is on. Writing `false` here made the
+      // router serialize `edit=false` into the URL on every visit, which changed
+      // the address the auth guard had just captured as the post-sign-in
+      // destination (and added noise to otherwise clean deep links).
+      edit: [true, 1, "1", "true"].includes(
+        search.edit as string | number | boolean,
+      )
+        ? true
+        : undefined,
+      new: value("new"),
+      view: value("view"),
+      member: value("member"),
+      phase: value("phase"),
+      q: value("q"),
+      owner: value("owner"),
+      group: value("group"),
+    };
+  },
+  component: TeamProjectsRoutePage,
+});
 
 function CaptureRoutePage() {
   return (
@@ -372,20 +500,59 @@ function CaptureRoutePage() {
   );
 }
 
-const calendarRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/calendar",
-  component: CalendarRoutePage,
-});
-
 const captureRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/capture",
   component: CaptureRoutePage,
 });
 
+function ArticlesRoutePage() {
+  return (
+    <AuthenticatedRoute>
+      <Suspense fallback={<RouteLoading />}>
+        <ArticlesPage />
+      </Suspense>
+    </AuthenticatedRoute>
+  );
+}
+
+const articlesRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/articles",
+  component: ArticlesRoutePage,
+  loader: ({ context }) => {
+    warmQuery(
+      context.queryClient.ensureQueryData({
+        queryKey: ["articles"],
+        queryFn: () => listArticles({ include_deleted: true }),
+      }),
+    );
+  },
+});
+
+function ArticleEditorRoutePage() {
+  const { articleId } = articleEditRoute.useParams();
+  return (
+    <AuthenticatedRoute>
+      <Suspense fallback={<RouteLoading />}>
+        <ArticleEditorPage articleId={articleId} />
+      </Suspense>
+    </AuthenticatedRoute>
+  );
+}
+
+const articleEditRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/articles/$articleId/edit",
+  component: ArticleEditorRoutePage,
+});
+
 const router = createRouter({
   defaultPreload: "intent",
+  // The real QueryClient is injected by AppRoutes (inside
+  // QueryClientProvider) through RouterProvider's context prop; the typed
+  // placeholder keeps route loader signatures aware of it.
+  context: { queryClient: undefined as unknown as QueryClient },
   routeTree: rootRoute.addChildren([
     indexRoute,
     memoRoute,
@@ -403,8 +570,10 @@ const router = createRouter({
     randomWalkRoute,
     memoryRoute,
     projectsRoute,
-    calendarRoute,
+    teamProjectsRoute,
     captureRoute,
+    articlesRoute,
+    articleEditRoute,
   ]),
   scrollRestoration: true,
 });
@@ -415,11 +584,23 @@ declare module "@tanstack/react-router" {
   }
 }
 
+// DirectionProvider 开关镜像菜单/弹层的 RTL 行为；dir 属性与视觉排版
+// 由 I18nProvider 与 CSS 各自负责（Base UI 不代管 HTML）。
+function DirectionalRoutes() {
+  const { locale } = useI18n();
+  const queryClient = useQueryClient();
+  return (
+    <DirectionProvider direction={isRtlLocale(locale) ? "rtl" : "ltr"}>
+      <RouterProvider context={{ queryClient }} router={router} />
+      <Toaster />
+    </DirectionProvider>
+  );
+}
+
 export function AppRoutes() {
   return (
     <TooltipProvider>
-      <RouterProvider router={router} />
-      <Toaster />
+      <DirectionalRoutes />
     </TooltipProvider>
   );
 }

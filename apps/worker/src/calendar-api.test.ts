@@ -167,7 +167,7 @@ describe("FlareMo calendar API", () => {
     expect(weekly).toBeDefined();
     await json(
       await fetchApp(
-        `http://flaremo.test/api/app/tasks/${bareId(weekly!.id)}`,
+        `http://flaremo.test/api/app/tasks/${bareId(weekly?.id)}`,
         {
           method: "PATCH",
           headers: { "content-type": "application/json" },
@@ -185,6 +185,44 @@ describe("FlareMo calendar API", () => {
     expect(
       after.tasks.find((task) => task.title === "9 月 12 日要开周会"),
     ).toMatchObject({ status: "done" });
+  });
+
+  it("returns 24-hour activity buckets for a given date", async () => {
+    await json(
+      await fetchApp("http://flaremo.test/api/app/memos", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ content: "一条小时测试笔记" }),
+      }),
+    );
+
+    // The endpoint's `date` is a *local* calendar date (it is paired with
+    // `tz` below), so it has to be formatted in local time. Deriving it from
+    // `toISOString()` instead picks the UTC date, and between local midnight
+    // and 08:00 in any negative-offset-of-UTC zone such as Asia/Shanghai the
+    // two differ — the memo just written then falls outside the window the
+    // test asks about, and the assertion below fails for several hours a day.
+    const today = new Intl.DateTimeFormat("en-CA").format(new Date());
+    const tz = new Date().getTimezoneOffset();
+    const res = await fetchApp(
+      `http://flaremo.test/api/app/stats/hourly?date=${today}&tz=${tz}`,
+    );
+    expect(res.status).toBe(200);
+    const data = await json<{ hours: Array<{ hour: number; count: number }> }>(
+      res,
+    );
+    expect(data.hours).toHaveLength(24);
+    expect(data.hours[0]?.hour).toBe(0);
+    expect(data.hours[23]?.hour).toBe(23);
+    const totalCount = data.hours.reduce((acc, h) => acc + h.count, 0);
+    expect(totalCount).toBeGreaterThanOrEqual(1);
+
+    const unauthenticated = await fetchApp(
+      `http://flaremo.test/api/app/stats/hourly?date=${today}`,
+      undefined,
+      { authenticated: false },
+    );
+    expect(unauthenticated.status).toBe(401);
   });
 
   it("rejects invalid ranges and unauthenticated access", async () => {

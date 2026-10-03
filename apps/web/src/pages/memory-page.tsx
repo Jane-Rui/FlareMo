@@ -1,82 +1,40 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  ArchiveIcon,
-  CheckIcon,
-  LockIcon,
-  LockOpenIcon,
-  MoreHorizontalIcon,
-  NotebookPenIcon,
-  PencilIcon,
-  PlusIcon,
-  SearchIcon,
-  Trash2Icon,
+  AlertCircleIcon,
+  BrainIcon,
+  EyeIcon,
+  FolderIcon,
+  PinIcon,
 } from "lucide-react";
-import { useMemo, useState } from "react";
-import { toast } from "sonner";
-import {
-  archiveMemory,
-  confirmMemory,
-  createMemory,
-  deleteMemory,
-  listMemories,
-  listMemoryReview,
-  listMemoryRevisions,
-  lockMemory,
-  type Memory,
-  promoteMemoryToMemo,
-  unlockMemory,
-  updateMemory,
-} from "@/api";
-import { SubpageHeader } from "@/components/subpage-header";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
-import { Badge } from "@/components/ui/badge";
+import { useCallback, useMemo, useState } from "react";
+import { listMemories, listMemoryReview } from "@/api";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import {
-  Empty,
-  EmptyDescription,
-  EmptyHeader,
-  EmptyTitle,
-} from "@/components/ui/empty";
-import { Field } from "@/components/ui/field";
-import { Input } from "@/components/ui/input";
-import { Skeleton } from "@/components/ui/skeleton";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Textarea } from "@/components/ui/textarea";
+import { FilterPill } from "@/components/ui/filter-pill";
+import { WorkspaceLayout } from "@/components/workspace/workspace-layout";
 import { useI18n } from "@/i18n";
-import { errorMessage } from "@/lib/error";
-import { stripResourceName } from "@/lib/utils";
+import { formatProjectName, groupMemories } from "./memory/memory-filters";
+import { MemoryLensDialog } from "./memory/memory-lens-dialog";
+import { MemoryList } from "./memory/memory-list";
+import { MemoryQuickComposer } from "./memory/memory-quick-composer";
+import { MemoryWorkspaceHeader } from "./memory/memory-workspace-header";
+import { ProjectGroups } from "./memory/project-groups";
 
-type MemoryTab = "core" | "projects" | "recent" | "review" | "archive";
+type FilterTab =
+  | "all"
+  | "core"
+  | "observed"
+  | "projects"
+  | "review"
+  | "archive";
 
 export function MemoryPage() {
   const { t } = useI18n();
   const queryClient = useQueryClient();
-  const [tab, setTab] = useState<MemoryTab>("core");
+  const [tab, setTab] = useState<FilterTab>("all");
+  const [selectedProject, setSelectedProject] = useState<string | null>(null);
   const [query, setQuery] = useState("");
-  const [creating, setCreating] = useState(false);
+  const [lensOpen, setLensOpen] = useState(false);
+  const [isScrolled, setIsScrolled] = useState(false);
 
   const listQuery = useQuery({
     queryKey: ["memories", "list"],
@@ -101,701 +59,276 @@ export function MemoryPage() {
     );
   }, [memories, query]);
 
-  const groups = useMemo(() => {
-    const core = filtered.filter(
-      (m) => m.tier === "core" && m.status === "active",
-    );
-    const projects = filtered.filter((m) => m.scope_type === "project");
-    const recent = [...filtered].sort((a, b) =>
-      b.updated_at.localeCompare(a.updated_at),
-    );
-    const archive = filtered.filter((m) =>
-      ["superseded", "archived", "deleted"].includes(m.status),
-    );
-    return { core, projects, recent, archive };
-  }, [filtered]);
+  const groups = useMemo(() => groupMemories(filtered), [filtered]);
 
-  const invalidate = () => {
+  const projectCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const m of groups.projects) {
+      const key = m.scope_key ?? m.scope_type;
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+    return [...counts.entries()]
+      .map(([key, count]) => ({
+        key,
+        displayName: formatProjectName(key),
+        count,
+      }))
+      .sort((a, b) => b.count - a.count);
+  }, [groups.projects]);
+
+  const handleSelectProject = useCallback((projectKey: string | null) => {
+    setSelectedProject(projectKey);
+    setTab("projects");
+  }, []);
+
+  const reviewMemories = useMemo(
+    () => reviewQuery.data?.memories ?? [],
+    [reviewQuery.data],
+  );
+
+  // Stable identities so the memoized MemoryCard rows survive a parent render.
+  const invalidate = useCallback(() => {
     void queryClient.invalidateQueries({ queryKey: ["memories"] });
-  };
+  }, [queryClient]);
+
+  const reviewCount = reviewMemories.length;
 
   return (
-    <div className="min-h-svh bg-background px-4 py-5 sm:py-8">
-      <main className="mx-auto flex w-full max-w-[720px] flex-col gap-4">
-        <SubpageHeader />
+    <WorkspaceLayout
+      header={({
+        sidebarCollapsed,
+        toggleSidebarCollapsed,
+        mobileSheetOpen,
+        setMobileSheetOpen,
+        explorer,
+      }) => (
+        <MemoryWorkspaceHeader
+          explorer={explorer}
+          mobileSheetOpen={mobileSheetOpen}
+          setMobileSheetOpen={setMobileSheetOpen}
+          sidebarCollapsed={sidebarCollapsed}
+          toggleSidebarCollapsed={toggleSidebarCollapsed}
+          query={query}
+          onQueryChange={setQuery}
+          onOpenLens={() => setLensOpen(true)}
+          isScrolled={isScrolled}
+        />
+      )}
+      onScroll={(event) => {
+        setIsScrolled(event.currentTarget.scrollTop > 4);
+      }}
+    >
+      <div className="flex flex-col gap-3.5 pt-2">
+        {/* Pending Review Alert Banner */}
+        {reviewCount > 0 && (
+          <div className="flex items-center justify-between gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3.5 py-2.5 text-xs text-amber-600 dark:text-amber-400 motion-safe:animate-rise">
+            <div className="flex items-center gap-2 min-w-0 flex-1">
+              <AlertCircleIcon className="size-4 shrink-0 text-amber-500" />
+              <span className="truncate font-medium">
+                {t("memory.bannerReviewAlert", { count: reviewCount })}
+              </span>
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setTab("review")}
+              className="h-7 border-amber-500/30 bg-card px-2.5 text-xs text-amber-600 hover:bg-amber-500/15 dark:text-amber-400"
+            >
+              {t("memory.filterReview")}
+            </Button>
+          </div>
+        )}
 
-        <div className="flex items-end justify-between gap-3 px-1">
-          <h1 className="font-heading text-xl font-semibold">
-            {t("memory.title")}
-          </h1>
-          <Button size="sm" onClick={() => setCreating(true)}>
-            <PlusIcon data-icon="inline-start" />
-            {t("memory.newMemory")}
-          </Button>
+        {/* Quick Add Memory Box */}
+        <MemoryQuickComposer
+          defaultScopeKey={tab === "projects" ? selectedProject : null}
+          projects={projectCounts}
+          onCreated={invalidate}
+        />
+
+        {/* Filter Pills */}
+        <div className="flex flex-col gap-2 pt-0.5">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <FilterPill
+              active={tab === "all"}
+              label={t("memory.filterAll")}
+              count={groups.active.length}
+              onClick={() => {
+                setTab("all");
+                setSelectedProject(null);
+              }}
+            />
+            <FilterPill
+              active={tab === "core"}
+              label={t("memory.filterCore")}
+              count={groups.core.length}
+              icon={
+                <PinIcon className="size-3 text-brand-500 fill-brand-500/20" />
+              }
+              onClick={() => {
+                setTab("core");
+                setSelectedProject(null);
+              }}
+            />
+            {(groups.observed.length > 0 || tab === "observed") && (
+              <FilterPill
+                active={tab === "observed"}
+                label={t("memory.filterObserved")}
+                count={groups.observed.length}
+                icon={<EyeIcon className="size-3" />}
+                onClick={() => {
+                  setTab("observed");
+                  setSelectedProject(null);
+                }}
+              />
+            )}
+            {(groups.projects.length > 0 || tab === "projects") && (
+              <FilterPill
+                active={tab === "projects"}
+                label={t("memory.tab.projects")}
+                count={groups.projects.length}
+                icon={<FolderIcon className="size-3" />}
+                onClick={() => setTab("projects")}
+              />
+            )}
+            {(reviewCount > 0 || tab === "review") && (
+              <FilterPill
+                active={tab === "review"}
+                label={t("memory.filterReview")}
+                count={reviewCount}
+                highlight={reviewCount > 0}
+                onClick={() => {
+                  setTab("review");
+                  setSelectedProject(null);
+                }}
+              />
+            )}
+            {(groups.archive.length > 0 || tab === "archive") && (
+              <FilterPill
+                active={tab === "archive"}
+                label={t("memory.tab.archive")}
+                count={groups.archive.length}
+                onClick={() => {
+                  setTab("archive");
+                  setSelectedProject(null);
+                }}
+              />
+            )}
+          </div>
+
+          {/* Project Sub-pills (when projects tab is active) */}
+          {tab === "projects" && projectCounts.length > 0 && (
+            <div className="flex items-center gap-1.5 overflow-x-auto pb-1 pt-0.5 no-scrollbar text-xs">
+              <FilterPill
+                active={!selectedProject}
+                variant="sub"
+                label={t("memory.allProjects")}
+                count={groups.projects.length}
+                onClick={() => setSelectedProject(null)}
+              />
+
+              {projectCounts.map((p) => (
+                <FilterPill
+                  key={p.key}
+                  active={selectedProject === p.key}
+                  variant="sub"
+                  label={p.displayName}
+                  count={p.count}
+                  onClick={() => setSelectedProject(p.key)}
+                />
+              ))}
+            </div>
+          )}
         </div>
 
-        <div className="relative">
-          <SearchIcon
-            className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground"
-            data-icon="inline-start"
-          />
-          <Input
-            className="pl-9"
-            placeholder={t("memory.searchPlaceholder")}
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-          />
-        </div>
-
-        <Tabs value={tab} onValueChange={(value) => setTab(value as MemoryTab)}>
-          <TabsList className="w-full">
-            <TabsTrigger value="core">{t("memory.tab.core")}</TabsTrigger>
-            <TabsTrigger value="projects">
-              {t("memory.tab.projects")}
-            </TabsTrigger>
-            <TabsTrigger value="recent">{t("memory.tab.recent")}</TabsTrigger>
-            <TabsTrigger value="review">
-              {t("memory.tab.review")}
-              {reviewQuery.data && reviewQuery.data.memories.length > 0 && (
-                <span className="ml-1 text-xs text-muted-foreground tabular-nums">
-                  {reviewQuery.data.memories.length}
-                </span>
-              )}
-            </TabsTrigger>
-            <TabsTrigger value="archive">{t("memory.tab.archive")}</TabsTrigger>
-          </TabsList>
-
-          <TabsContent value="core" className="mt-3">
-            <MemoryList
-              memories={groups.core}
-              loading={listQuery.isLoading}
-              onMutated={invalidate}
-            />
-          </TabsContent>
-          <TabsContent value="projects" className="mt-3">
-            <ProjectGroups memories={groups.projects} onMutated={invalidate} />
-          </TabsContent>
-          <TabsContent value="recent" className="mt-3">
-            <MemoryList
-              memories={groups.recent}
-              loading={listQuery.isLoading}
-              onMutated={invalidate}
-              showSource
-            />
-          </TabsContent>
-          <TabsContent value="review" className="mt-3">
-            {reviewQuery.isError ? (
-              <Empty className="min-h-56 border">
-                <EmptyHeader>
-                  <EmptyTitle>{t("list.errorTitle")}</EmptyTitle>
-                  <EmptyDescription>
-                    {t("list.errorDescription")}
-                  </EmptyDescription>
-                </EmptyHeader>
-                <Button
-                  className="mt-2"
-                  size="sm"
-                  variant="outline"
-                  onClick={() => void reviewQuery.refetch()}
-                >
-                  {t("common.retry")}
-                </Button>
-              </Empty>
+        {/* Main Content Area */}
+        <div className="pt-1">
+          {tab === "all" &&
+            (memories.length === 0 && !listQuery.isLoading && !query ? (
+              <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-border/70 py-12 px-4 text-center motion-safe:animate-rise">
+                <BrainIcon className="size-8 text-muted-foreground/30" />
+                <p className="mt-3 font-medium text-sm text-foreground">
+                  {t("memory.emptyTitle")}
+                </p>
+                <p className="mt-1 max-w-xs text-xs text-muted-foreground">
+                  {t("memory.emptyDescription")}
+                </p>
+              </div>
             ) : (
               <MemoryList
-                memories={reviewQuery.data?.memories ?? []}
-                loading={reviewQuery.isLoading}
+                hasError={listQuery.isError && !listQuery.data}
+                isRetrying={listQuery.isRefetching}
+                loading={listQuery.isLoading}
+                memories={groups.active}
                 onMutated={invalidate}
-                review
+                onRetry={() => void listQuery.refetch()}
+                onSelectProject={handleSelectProject}
+                showSource
               />
-            )}
-          </TabsContent>
-          <TabsContent value="archive" className="mt-3">
+            ))}
+
+          {tab === "core" && (
             <MemoryList
-              emptyTitle={t("memory.archiveEmpty")}
-              memories={groups.archive}
+              hasError={listQuery.isError && !listQuery.data}
+              isRetrying={listQuery.isRefetching}
               loading={listQuery.isLoading}
+              memories={groups.core}
+              onMutated={invalidate}
+              onRetry={() => void listQuery.refetch()}
+              onSelectProject={handleSelectProject}
+            />
+          )}
+
+          {tab === "observed" && (
+            <MemoryList
+              hasError={listQuery.isError && !listQuery.data}
+              isRetrying={listQuery.isRefetching}
+              loading={listQuery.isLoading}
+              memories={groups.observed}
+              onMutated={invalidate}
+              onRetry={() => void listQuery.refetch()}
+              onSelectProject={handleSelectProject}
+              showSource
+            />
+          )}
+
+          {tab === "projects" && (
+            <ProjectGroups
+              memories={groups.projects}
+              selectedProject={selectedProject}
+              onSelectProject={setSelectedProject}
               onMutated={invalidate}
             />
-          </TabsContent>
-        </Tabs>
-
-        <MemoryFormDialog
-          open={creating}
-          onOpenChange={setCreating}
-          onSaved={invalidate}
-        />
-      </main>
-    </div>
-  );
-}
-
-function MemoryList({
-  memories,
-  loading,
-  onMutated,
-  emptyTitle,
-  showSource = false,
-  review = false,
-}: {
-  memories: Memory[];
-  loading: boolean;
-  onMutated: () => void;
-  emptyTitle?: string;
-  showSource?: boolean;
-  review?: boolean;
-}) {
-  const { t } = useI18n();
-
-  if (loading) {
-    return (
-      <div className="flex flex-col gap-3">
-        <Skeleton className="h-24 w-full" />
-        <Skeleton className="h-24 w-full" />
-      </div>
-    );
-  }
-
-  if (memories.length === 0) {
-    return (
-      <Empty className="min-h-56 border">
-        <EmptyHeader>
-          <EmptyTitle>
-            {emptyTitle ??
-              (review ? t("memory.reviewEmpty") : t("memory.emptyTitle"))}
-          </EmptyTitle>
-          {!review && !emptyTitle && (
-            <EmptyDescription>{t("memory.emptyDescription")}</EmptyDescription>
           )}
-        </EmptyHeader>
-      </Empty>
-    );
-  }
 
-  return (
-    <div className="flex flex-col gap-3">
-      {memories.map((memory) => (
-        <MemoryCard
-          key={memory.id}
-          memory={memory}
-          showSource={showSource}
-          review={review}
-          onMutated={onMutated}
-        />
-      ))}
-    </div>
-  );
-}
-
-function MemoryCard({
-  memory,
-  showSource,
-  review,
-  onMutated,
-}: {
-  memory: Memory;
-  showSource: boolean;
-  review: boolean;
-  onMutated: () => void;
-}) {
-  const { t } = useI18n();
-  const [confirmDelete, setConfirmDelete] = useState(false);
-  const [editing, setEditing] = useState(false);
-  const [showRevisions, setShowRevisions] = useState(false);
-
-  const confirmMutation = useMutation({
-    mutationFn: () => confirmMemory(stripResourceName(memory.id, "memories")),
-    onSuccess: () => {
-      toast.success(t("toast.memoryConfirmed"));
-      onMutated();
-    },
-    onError: (error) =>
-      toast.error(errorMessage(error, t("toast.memoryConfirmFailed"))),
-  });
-
-  const lockMutation = useMutation({
-    mutationFn: () => lockMemory(stripResourceName(memory.id, "memories")),
-    onSuccess: () => {
-      toast.success(t("toast.memoryLocked"));
-      onMutated();
-    },
-    onError: (error) =>
-      toast.error(errorMessage(error, t("toast.memoryLockFailed"))),
-  });
-
-  const unlockMutation = useMutation({
-    mutationFn: () => unlockMemory(stripResourceName(memory.id, "memories")),
-    onSuccess: () => {
-      toast.success(t("toast.memoryUnlocked"));
-      onMutated();
-    },
-    onError: (error) =>
-      toast.error(errorMessage(error, t("toast.memoryUnlockFailed"))),
-  });
-
-  const archiveMutation = useMutation({
-    mutationFn: () => archiveMemory(stripResourceName(memory.id, "memories")),
-    onSuccess: () => {
-      toast.success(t("toast.memoryArchived"));
-      onMutated();
-    },
-    onError: (error) =>
-      toast.error(errorMessage(error, t("toast.memoryArchiveFailed"))),
-  });
-
-  const promoteMutation = useMutation({
-    mutationFn: () =>
-      promoteMemoryToMemo(stripResourceName(memory.id, "memories")),
-    onSuccess: () => {
-      toast.success(t("toast.saved"));
-      onMutated();
-    },
-    onError: (error) =>
-      toast.error(errorMessage(error, t("toast.memoryPromoteFailed"))),
-  });
-
-  const deleteMutation = useMutation({
-    mutationFn: () => deleteMemory(stripResourceName(memory.id, "memories")),
-    onSuccess: () => {
-      toast.success(t("toast.memoryDeleted"));
-      onMutated();
-    },
-    onError: (error) =>
-      toast.error(errorMessage(error, t("toast.memoryDeleteFailed"))),
-  });
-
-  const id = stripResourceName(memory.id, "memories");
-
-  return (
-    <Card>
-      <CardContent className="flex flex-col gap-3">
-        <p className="text-sm whitespace-pre-wrap">{memory.content}</p>
-
-        <div className="flex flex-wrap items-center gap-1.5">
-          <Badge variant="outline">{t(`memory.type.${memory.type}`)}</Badge>
-          <Badge variant="outline">{t(`memory.kind.${memory.kind}`)}</Badge>
-          <Badge variant="secondary">
-            {t(`memory.scope.${memory.scope_type}`)}
-          </Badge>
-          <Badge variant="flame">
-            {t(`memory.verification.${memory.verification}`)}
-          </Badge>
-          {memory.tier === "core" && <Badge>{t("memory.tier.core")}</Badge>}
-          {showSource && memory.source_agent && (
-            <span className="text-xs text-muted-foreground">
-              {t("memory.sourceAgent")}: {memory.source_agent}
-            </span>
-          )}
-          {review && memory.review_reason && (
-            <span className="text-xs text-muted-foreground">
-              {memory.review_reason}
-            </span>
-          )}
-        </div>
-
-        <div className="flex flex-wrap items-center gap-1.5">
-          {memory.verification !== "locked" &&
-            memory.verification !== "confirmed" && (
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => confirmMutation.mutate()}
-              >
-                <CheckIcon data-icon="inline-start" />
-                {t("memory.confirm")}
-              </Button>
-            )}
-          {memory.verification === "locked" ? (
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => unlockMutation.mutate()}
-            >
-              <LockOpenIcon data-icon="inline-start" />
-              {t("memory.unlock")}
-            </Button>
-          ) : (
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => lockMutation.mutate()}
-            >
-              <LockIcon data-icon="inline-start" />
-              {t("memory.lock")}
-            </Button>
-          )}
-          {memory.status === "active" && (
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={() => archiveMutation.mutate()}
-            >
-              <ArchiveIcon data-icon="inline-start" />
-              {t("memory.archive")}
-            </Button>
-          )}
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button
-                aria-label={t("common.actions")}
-                className="ml-auto"
-                size="icon-sm"
-                variant="ghost"
-              >
-                <MoreHorizontalIcon />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              <DropdownMenuItem onClick={() => setEditing(true)}>
-                <PencilIcon />
-                {t("common.edit")}
-              </DropdownMenuItem>
-              <DropdownMenuItem
-                onClick={() => setShowRevisions((value) => !value)}
-              >
-                {t("memory.revisions")}
-              </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => promoteMutation.mutate()}>
-                <NotebookPenIcon />
-                {t("memory.toMemo")}
-              </DropdownMenuItem>
-              <DropdownMenuItem
-                variant="destructive"
-                onSelect={() => setConfirmDelete(true)}
-              >
-                <Trash2Icon />
-                {t("common.delete")}
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        </div>
-
-        {showRevisions && <MemoryRevisions memoryId={id} />}
-
-        <AlertDialog open={confirmDelete} onOpenChange={setConfirmDelete}>
-          <AlertDialogContent size="sm">
-            <AlertDialogHeader>
-              <AlertDialogTitle>{t("memory.deleteConfirm")}</AlertDialogTitle>
-              <AlertDialogDescription>
-                {memory.content.slice(0, 80)}
-                {memory.content.length > 80 ? "…" : ""}
-              </AlertDialogDescription>
-            </AlertDialogHeader>
-            <AlertDialogFooter>
-              <AlertDialogCancel variant="ghost">
-                {t("common.cancel")}
-              </AlertDialogCancel>
-              <AlertDialogAction
-                variant="destructive"
-                onClick={() => deleteMutation.mutate()}
-              >
-                {t("common.delete")}
-              </AlertDialogAction>
-            </AlertDialogFooter>
-          </AlertDialogContent>
-        </AlertDialog>
-
-        <MemoryFormDialog
-          key={[
-            memory.id,
-            memory.content,
-            memory.type,
-            memory.kind,
-            memory.scope_type,
-            memory.scope_key ?? "",
-            memory.importance,
-          ].join("|")}
-          memory={memory}
-          open={editing}
-          onOpenChange={setEditing}
-          onSaved={onMutated}
-        />
-      </CardContent>
-    </Card>
-  );
-}
-
-function MemoryRevisions({ memoryId }: { memoryId: string }) {
-  const { t } = useI18n();
-  const revisionsQuery = useQuery({
-    queryKey: ["memories", "revisions", memoryId],
-    queryFn: () => listMemoryRevisions(memoryId),
-  });
-
-  if (revisionsQuery.isLoading) {
-    return <Skeleton className="h-16 w-full" />;
-  }
-  if (revisionsQuery.isError) {
-    return (
-      <Empty className="min-h-40 border">
-        <EmptyHeader>
-          <EmptyTitle>{t("list.errorTitle")}</EmptyTitle>
-          <EmptyDescription>{t("list.errorDescription")}</EmptyDescription>
-        </EmptyHeader>
-        <Button
-          className="mt-2"
-          size="sm"
-          variant="outline"
-          onClick={() => void revisionsQuery.refetch()}
-        >
-          {t("common.retry")}
-        </Button>
-      </Empty>
-    );
-  }
-  const revisions = revisionsQuery.data?.revisions ?? [];
-  if (revisions.length === 0) {
-    return (
-      <p className="text-xs text-muted-foreground">{t("memory.noRevisions")}</p>
-    );
-  }
-  return (
-    <div className="flex flex-col gap-2 border-t pt-3">
-      {revisions.map((revision) => (
-        <div className="text-xs text-muted-foreground" key={revision.id}>
-          <time className="tabular-nums">
-            {formatTimestamp(revision.created_at)}
-          </time>
-          <p className="mt-1 whitespace-pre-wrap">{revision.content}</p>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function ProjectGroups({
-  memories,
-  onMutated,
-}: {
-  memories: Memory[];
-  onMutated: () => void;
-}) {
-  const { t } = useI18n();
-  const byProject = useMemo(() => {
-    const map = new Map<string, Memory[]>();
-    for (const memory of memories) {
-      const key = memory.scope_key ?? memory.scope_type;
-      const list = map.get(key) ?? [];
-      list.push(memory);
-      map.set(key, list);
-    }
-    return [...map.entries()];
-  }, [memories]);
-
-  if (byProject.length === 0) {
-    return (
-      <Empty className="min-h-56 border">
-        <EmptyHeader>
-          <EmptyTitle>{t("memory.emptyTitle")}</EmptyTitle>
-          <EmptyDescription>{t("memory.emptyDescription")}</EmptyDescription>
-        </EmptyHeader>
-      </Empty>
-    );
-  }
-
-  return (
-    <div className="flex flex-col gap-5">
-      {byProject.map(([project, items]) => (
-        <section className="flex flex-col gap-2" key={project}>
-          <h2 className="flex items-baseline gap-1.5 px-1 text-sm font-medium text-muted-foreground">
-            <span className="truncate">{project}</span>
-            <span className="text-xs tabular-nums opacity-60">
-              {items.length}
-            </span>
-          </h2>
-          <MemoryList
-            memories={items}
-            loading={false}
-            onMutated={onMutated}
-            showSource
-          />
-        </section>
-      ))}
-    </div>
-  );
-}
-
-function MemoryFormDialog({
-  memory,
-  open,
-  onOpenChange,
-  onSaved,
-}: {
-  memory?: Memory;
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  onSaved: () => void;
-}) {
-  const { t } = useI18n();
-  const [content, setContent] = useState(memory?.content ?? "");
-  const [type, setType] = useState<Memory["type"]>(memory?.type ?? "semantic");
-  const [kind, setKind] = useState<Memory["kind"]>(memory?.kind ?? "fact");
-  const [scopeType, setScopeType] = useState<Memory["scope_type"]>(
-    memory?.scope_type ?? "global",
-  );
-  const [scopeKey, setScopeKey] = useState(memory?.scope_key ?? "");
-  const [importance, setImportance] = useState(memory?.importance ?? 50);
-  const [lock, setLock] = useState(false);
-
-  const saveMutation = useMutation({
-    mutationFn: () =>
-      memory
-        ? updateMemory(stripResourceName(memory.id, "memories"), {
-            content,
-            type,
-            kind,
-            scope_type: scopeType,
-            scope_key: scopeKey.trim() || undefined,
-            importance,
-          })
-        : createMemory({
-            content,
-            type,
-            kind,
-            scope_type: scopeType,
-            scope_key: scopeKey.trim() || undefined,
-            tier: "normal",
-            importance,
-            lock,
-          }),
-    onSuccess: () => {
-      toast.success(t("common.save"));
-      if (!memory) {
-        setContent("");
-        setScopeKey("");
-      }
-      onOpenChange(false);
-      onSaved();
-    },
-    onError: (error) => {
-      toast.error(
-        error instanceof Error
-          ? error.message
-          : t(memory ? "memory.updateFailed" : "memory.createFailed"),
-      );
-    },
-  });
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle>
-            {memory ? t("memory.editMemory") : t("memory.newMemory")}
-          </DialogTitle>
-        </DialogHeader>
-        <div className="flex flex-col gap-4">
-          <Field label={t("memory.content")}>
-            <Textarea
-              rows={4}
-              value={content}
-              placeholder={t("memory.contentPlaceholder")}
-              onChange={(event) => setContent(event.target.value)}
+          {tab === "review" && (
+            <MemoryList
+              memories={reviewMemories}
+              loading={reviewQuery.isLoading}
+              hasError={reviewQuery.isError}
+              onMutated={invalidate}
+              onRetry={() => void reviewQuery.refetch()}
+              onSelectProject={handleSelectProject}
+              review
             />
-          </Field>
-          <div className="grid grid-cols-2 gap-3">
-            <Field label={t("memory.type")}>
-              <select
-                className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm"
-                value={type}
-                onChange={(event) =>
-                  setType(event.target.value as Memory["type"])
-                }
-              >
-                <option value="semantic">{t("memory.type.semantic")}</option>
-                <option value="episodic">{t("memory.type.episodic")}</option>
-                <option value="procedural">
-                  {t("memory.type.procedural")}
-                </option>
-              </select>
-            </Field>
-            <Field label={t("memory.kind")}>
-              <select
-                className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm"
-                value={kind}
-                onChange={(event) =>
-                  setKind(event.target.value as Memory["kind"])
-                }
-              >
-                {KINDS.map((value) => (
-                  <option key={value} value={value}>
-                    {t(`memory.kind.${value}`)}
-                  </option>
-                ))}
-              </select>
-            </Field>
-            <Field label={t("memory.scope")}>
-              <select
-                className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm"
-                value={scopeType}
-                onChange={(event) =>
-                  setScopeType(event.target.value as Memory["scope_type"])
-                }
-              >
-                <option value="global">{t("memory.scope.global")}</option>
-                <option value="workspace">{t("memory.scope.workspace")}</option>
-                <option value="project">{t("memory.scope.project")}</option>
-                <option value="agent">{t("memory.scope.agent")}</option>
-              </select>
-            </Field>
-            <Field label={t("memory.importance")}>
-              <input
-                className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm"
-                max={100}
-                min={0}
-                type="number"
-                value={importance}
-                onChange={(event) =>
-                  setImportance(Number.parseInt(event.target.value, 10) || 0)
-                }
-              />
-            </Field>
-          </div>
-          {scopeType !== "global" && (
-            <Field label={t("memory.scopeKey")}>
-              <Input
-                value={scopeKey}
-                placeholder="github:owner/repo"
-                onChange={(event) => setScopeKey(event.target.value)}
-              />
-            </Field>
           )}
-          {!memory && (
-            <label className="flex items-center gap-2 text-sm">
-              <input
-                checked={lock}
-                type="checkbox"
-                onChange={(event) => setLock(event.target.checked)}
-              />
-              {t("memory.lock")}
-            </label>
+
+          {tab === "archive" && (
+            <MemoryList
+              emptyTitle={t("memory.archiveEmpty")}
+              hasError={listQuery.isError && !listQuery.data}
+              isRetrying={listQuery.isRefetching}
+              loading={listQuery.isLoading}
+              memories={groups.archive}
+              onMutated={invalidate}
+              onRetry={() => void listQuery.refetch()}
+              onSelectProject={handleSelectProject}
+            />
           )}
         </div>
-        <DialogFooter>
-          <Button
-            disabled={!content.trim() || saveMutation.isPending}
-            onClick={() => saveMutation.mutate()}
-          >
-            {t("common.save")}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+      </div>
+
+      <MemoryLensDialog open={lensOpen} onOpenChange={setLensOpen} />
+    </WorkspaceLayout>
   );
-}
-
-const KINDS: Memory["kind"][] = [
-  "preference",
-  "fact",
-  "decision",
-  "constraint",
-  "entity",
-  "event",
-  "outcome",
-  "lesson",
-  "procedure",
-];
-
-function formatTimestamp(value: string) {
-  return new Date(value).toLocaleString();
 }

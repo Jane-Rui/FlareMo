@@ -13,6 +13,11 @@ const DRAFT_STORE = "drafts";
 const SUBMISSION_QUEUE_STORE = "submission-queue";
 
 export type MemoCaptureInput = {
+  /**
+   * Title when drafting an article in the fullscreen composer. Empty or
+   * undefined for regular memos.
+   */
+  title?: string;
   content: string;
   visibility: MemoVisibility;
   tags: string[];
@@ -155,6 +160,7 @@ export function createMemoCaptureInput(
   input: MemoCaptureInput,
 ): MemoCaptureInput {
   return {
+    ...(input.title !== undefined ? { title: input.title } : {}),
     content: input.content,
     visibility: input.visibility,
     tags: normalizeTags(input.tags),
@@ -167,7 +173,11 @@ export function createMemoCaptureInput(
 }
 
 export function isMemoCaptureEmpty(input: MemoCaptureInput) {
-  return input.content.trim().length === 0 && input.files.length === 0;
+  return (
+    input.content.trim().length === 0 &&
+    input.files.length === 0 &&
+    (!input.title || input.title.trim().length === 0)
+  );
 }
 
 /** Returns false instead of throwing when IndexedDB is disabled or unavailable. */
@@ -310,6 +320,7 @@ function normalizeTags(tags: string[]) {
 function toPersistedCapture(input: MemoCaptureInput): PersistedMemoCapture {
   const capture = createMemoCaptureInput(input);
   return {
+    ...(capture.title !== undefined ? { title: capture.title } : {}),
     content: capture.content,
     visibility: capture.visibility,
     tags: capture.tags,
@@ -356,6 +367,7 @@ function fromQueuedSubmissionRecord(
 
 function fromPersistedCapture(record: PersistedMemoCapture): MemoCaptureInput {
   return {
+    ...(record.title !== undefined ? { title: record.title } : {}),
     content: record.content,
     visibility: record.visibility,
     tags: [...record.tags],
@@ -435,8 +447,15 @@ async function openDatabase(): Promise<IDBDatabase | null> {
       };
       finish(database);
     };
-    request.onerror = () => finish(null);
-    request.onblocked = () => finish(null);
+    // A failed open must not poison the cached promise for the whole
+    // session: the next call retries (e.g. after another tab releases the
+    // version upgrade lock).
+    const fail = () => {
+      databasePromise = undefined;
+      finish(null);
+    };
+    request.onerror = () => fail();
+    request.onblocked = () => fail();
   });
 
   return databasePromise;

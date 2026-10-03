@@ -1,15 +1,23 @@
+import type { MemoVisibility } from "@flaremo/contracts";
 import { useNavigate } from "@tanstack/react-router";
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
+import type { MemoSpace } from "@/api";
 import { MemoComposer } from "@/components/memo-composer";
 import { useMemoMutations } from "@/hooks/use-memo-mutations";
 import { useNewMemoCapture } from "@/hooks/use-new-memo-capture";
 import { useI18n } from "@/i18n";
 import {
+  createArticleWithAttachments,
+  MAX_ARTICLE_CONTENT_LENGTH,
+} from "@/lib/article-submission";
+import { focusComposerInput } from "@/lib/composer-focus";
+import {
   enqueueMemoSubmission,
   flushQueuedMemoSubmissions,
   getNewMemoDraftId,
   isBrowserOnline,
+  isMemoCaptureEmpty,
   type MemoCaptureInput,
 } from "@/lib/local-memo-capture";
 import {
@@ -17,6 +25,32 @@ import {
   shouldQueueAfterFailure,
   validateMemoCaptureSubmission,
 } from "@/lib/memo-submission";
+import { stripResourceName } from "@/lib/utils";
+
+// The composer's send target defaults to the active space ("归属在创建时决定").
+// An explicit pick is remembered per space so a member who publishes to the
+// team keeps that habit without re-selecting on every visit.
+const VISIBILITY_PREF_KEY = "flaremo.composer.visibility";
+
+type VisibilityPref = Partial<Record<MemoSpace, MemoVisibility>>;
+
+function readVisibilityPref(): VisibilityPref {
+  try {
+    const raw = localStorage.getItem(VISIBILITY_PREF_KEY);
+    const parsed = raw ? (JSON.parse(raw) as VisibilityPref) : null;
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeVisibilityPref(pref: VisibilityPref) {
+  try {
+    localStorage.setItem(VISIBILITY_PREF_KEY, JSON.stringify(pref));
+  } catch {
+    // Persistence is best-effort; the in-memory choice still applies.
+  }
+}
 
 // Keep draft updates and upload progress inside the capture boundary. This
 // component stays mounted across workspace filters so drafts and offline
@@ -24,14 +58,30 @@ import {
 export const WorkspaceComposer = memo(function WorkspaceComposer({
   visible,
   composeRequested,
+  space,
+  hasTeam,
+  tags,
+  captureAvailable,
 }: {
   visible: boolean;
   composeRequested: boolean;
+  space: MemoSpace;
+  hasTeam: boolean;
+  tags?: Array<{ name: string; count: number }>;
+  captureAvailable?: boolean;
 }) {
-  const { t } = useI18n();
+  const { locale, t } = useI18n();
   const navigate = useNavigate({ from: "/" });
   const [newMemoDraftId] = useState(getNewMemoDraftId);
-  const capture = useNewMemoCapture({ draftId: newMemoDraftId });
+  const [visibilityPref, setVisibilityPref] =
+    useState<VisibilityPref>(readVisibilityPref);
+  const spaceDefault: MemoVisibility =
+    hasTeam && space === "team" ? "protected" : "private";
+  const preferredVisibility = visibilityPref[space] ?? spaceDefault;
+  const capture = useNewMemoCapture({
+    draftId: newMemoDraftId,
+    initialVisibility: preferredVisibility,
+  });
   const { createMemoAsync, isCreatingMemo, handleMutationError } =
     useMemoMutations();
   const isQueueFlushing = useRef(false);
@@ -40,6 +90,20 @@ export const WorkspaceComposer = memo(function WorkspaceComposer({
   const restoredDraftNotified = useRef(false);
   const [isCaptureSubmissionPending, setIsCaptureSubmissionPending] =
     useState(false);
+
+  // Following the space into a different corpus retargets an untouched draft.
+  // A draft with content keeps the visibility its author already chose.
+  const lastVisibilitySource = useRef(preferredVisibility);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: retarget on preference change, not on every draft keystroke; the capture object is stable across renders
+  useEffect(() => {
+    if (lastVisibilitySource.current === preferredVisibility) return;
+    lastVisibilitySource.current = preferredVisibility;
+    if (!isMemoCaptureEmpty(capture.draft)) return;
+    capture.updateDraft((current) => ({
+      ...current,
+      visibility: preferredVisibility,
+    }));
+  }, [preferredVisibility]);
 
   const flushQueuedCaptures = useCallback(async () => {
     if (!isBrowserOnline()) return;
@@ -94,11 +158,7 @@ export const WorkspaceComposer = memo(function WorkspaceComposer({
   // strip the flag so a later reload does not steal focus again.
   useEffect(() => {
     if (!composeRequested || !visible) return;
-    const composer = document.getElementById("flaremo-composer-input");
-    if (composer instanceof HTMLTextAreaElement) {
-      composer.focus();
-      composer.setSelectionRange(composer.value.length, composer.value.length);
-    }
+    focusComposerInput();
     void navigate({
       replace: true,
       search: (current) => ({ ...current, compose: undefined }),
@@ -157,13 +217,62 @@ export const WorkspaceComposer = memo(function WorkspaceComposer({
     }
   };
 
+  const handleArticleSubmit = async (input: MemoCaptureInput) => {
+    if (isCaptureSubmitting.current) return;
+
+    if (!isBrowserOnline()) {
+      toast.error(t("composer.article.offlineBlocked"));
+      return;
+    }
+
+    if (input.content.length > MAX_ARTICLE_CONTENT_LENGTH) {
+      toast.error(t("composer.article.tooLong"));
+      return;
+    }
+
+    isCaptureSubmitting.current = true;
+    setIsCaptureSubmissionPending(true);
+    try {
+      const article = await createArticleWithAttachments(input, {
+        title: input.title,
+        lang: locale,
+      });
+      await capture.discardDraft();
+      toast.success(t("toast.saved"));
+      navigate({
+        to: "/articles/$articleId/edit",
+        params: { articleId: stripResourceName(article.id, "articles") },
+      });
+    } catch (error) {
+      if (error instanceof Error && error.message === "article-too-long") {
+        toast.error(t("composer.article.tooLong"));
+      } else {
+        toast.error(t("article.createFailed"));
+      }
+    } finally {
+      isCaptureSubmitting.current = false;
+      setIsCaptureSubmissionPending(false);
+    }
+  };
+
   if (!visible) return null;
   return (
     <MemoComposer
       draft={capture.draft}
       isPending={isCreatingMemo || isCaptureSubmissionPending}
+      showVisibility={hasTeam}
+      tags={tags}
+      captureAvailable={captureAvailable}
       onDraftChange={capture.updateDraft}
+      onVisibilityChange={(visibility) => {
+        setVisibilityPref((current) => {
+          const next = { ...current, [space]: visibility };
+          writeVisibilityPref(next);
+          return next;
+        });
+      }}
       onSubmit={handleCaptureSubmit}
+      onSubmitArticle={handleArticleSubmit}
     />
   );
 });

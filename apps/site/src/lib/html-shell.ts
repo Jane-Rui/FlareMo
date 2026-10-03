@@ -1,4 +1,12 @@
-import { buildSeoHead, type Locale, localeHref, type SeoHead } from "@/lib/seo";
+import {
+  buildSeoHead,
+  type Locale,
+  localeDirection,
+  localeHref,
+  localeHtmlLang,
+  type SeoHead,
+} from "@/lib/seo";
+import { THEME_BOOT_SCRIPT } from "@/lib/theme";
 
 /**
  * Renders the full static HTML document shell used by scripts/build.mjs for
@@ -8,9 +16,13 @@ import { buildSeoHead, type Locale, localeHref, type SeoHead } from "@/lib/seo";
 export function renderHtmlShell(
   body: string,
   seo: SeoHead,
-  locale: Locale = "zh-CN",
+  locale: Locale = "en",
 ): string {
-  const lang = locale === "en-US" ? "en" : "zh-CN";
+  // Same helpers the client-side effect in RootLayout uses, so a locale switch
+  // without a reload lands on exactly the values this shell was built with.
+  const lang = localeHtmlLang(locale);
+  const dir = localeDirection(locale);
+
   const metaTags = seo.meta
     .map((m) => {
       if (m.property)
@@ -31,7 +43,7 @@ export function renderHtmlShell(
     .join("\n    ");
 
   return `<!DOCTYPE html>
-<html lang="${lang}">
+<html lang="${lang}" dir="${dir}">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -43,7 +55,7 @@ export function renderHtmlShell(
     ${metaTags}
     ${linkTags}
     ${scriptTags}
-    <script>/* theme + favicon swap before hydration */</script>
+    <script>${THEME_BOOT_SCRIPT}</script>
   </head>
   <body>
     <div id="root">${body}</div>
@@ -56,7 +68,7 @@ export function buildSeoForPath(
   pathname: string,
   title: string,
   description: string,
-  locale: "zh-CN" | "en-US",
+  locale: Locale = "en",
   opts?: { jsonLd?: unknown; ogType?: "website" | "article" },
 ) {
   return buildSeoHead({

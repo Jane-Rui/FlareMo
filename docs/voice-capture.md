@@ -1,5 +1,7 @@
 # Voice Capture
 
+The instance owner can now configure shared provider credentials from Account. See [Owner-managed voice recognition](./voice-settings.md) for setup, precedence over these environment variables, encryption, permissions, and credential storage.
+
 Capture adds an authenticated, foreground voice-to-note flow at `/capture`. The microphone opens only after **Start recording**. Keep the page visible, wait until it says **Recording**, then speak. Stop closes the microphone and waits for the final sentence, then opens an editor. Save produces an ordinary FlareMo note with the `voice` tag and private visibility by default.
 
 No original audio is retained. Switching tabs, leaving, logout, or interruption stops capture. Reload never resumes recording automatically. Local text recovery is available in the same browser tab session; it is not a server backup. If IndexedDB is unavailable, Capture reports that recovery is unavailable but recording and direct Memo saving still work. Reconnection can leave transcript gaps, and incomplete final speech is not promoted into a confirmed sentence. Network and capacity failures can retry with bounded backoff; credential, quota, model and protocol failures stop immediately so the UI does not remain in a misleading reconnect loop.
@@ -8,7 +10,9 @@ The production Service Worker includes `/capture` in FlareMo's authenticated app
 
 ## Configure a test environment
 
-The deployment needs an external streaming ASR provider: Tencent Cloud or DashScope. The realtime-context reference contains a DashScope connection implementation; it does not supply an account credential. The status endpoint reports configuration readiness, not a successful cloud connection, account permission, or available quota. Reading status does not invoke an ASR service.
+The deployment needs an external streaming ASR provider: Tencent Cloud, DashScope, or Volcano Engine (Doubao). The realtime-context reference contains a DashScope connection implementation; it does not supply an account credential. The status endpoint reports configuration readiness, not a successful cloud connection, account permission, or available quota. Reading status does not invoke an ASR service.
+
+Credentials can be configured in the settings UI without any console access ([voice-settings.md](./voice-settings.md)); the `FLAREMO_ASR_*` variables below remain supported as deployment-level configuration and take precedence over the saved settings when they fully resolve.
 
 ### Tencent Cloud
 
@@ -34,6 +38,22 @@ Tencent hotwords improve product names and domain terms without changing the bro
 For an existing authorized Cloudflare test deployment, put SecretId and SecretKey in Worker secrets using the dashboard or `pnpm exec wrangler secret put FLAREMO_ASR_TENCENT_SECRET_ID` and `pnpm exec wrangler secret put FLAREMO_ASR_TENCENT_SECRET_KEY`. The commands read values interactively; do not append secret values to command arguments. AppID, provider, model and a non-sensitive hotword ID can use Worker vars. Store a private temporary hotword list as a Worker secret. No extra server, SDK service, or database is required.
 
 Check the account's realtime traffic region and realtime quota/postpaid settings. A Worker request originating outside mainland China may require Tencent's cross-border realtime service; a successful file-transcription request from Hong Kong does not establish that this is enabled. See [Tencent realtime protocol](https://cloud.tencent.com/document/product/1093/48982) and [regional billing/service rules](https://cloud.tencent.com/document/product/1093/35686). Account permissions, billing and actual network reachability still require live verification.
+
+### Volcano Engine (Doubao)
+
+Volcano Engine's 大模型流式语音识别 (`volc.bigasr.sauc`) speaks a binary-frame WebSocket protocol on `wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async`. The adapter sends uncompressed JSON-framed PCM and expects the server to mirror that choice; the 200 ms frames arrive as `full server response` frames whose `definite` utterances map to final sentences. Silence windows report status `1013`, which is ignored rather than treated as a failure.
+
+For local development, add the following to the existing ignored `.dev.vars` without overwriting your authentication settings:
+
+```dotenv
+FLAREMO_ASR_PROVIDER=volcengine
+FLAREMO_ASR_VOLCENGINE_APP_ID=<AppID from the console>
+FLAREMO_ASR_VOLCENGINE_ACCESS_TOKEN=<Access Token from the console>
+# Optional: hourly billing (default) vs concurrent billing.
+# FLAREMO_ASR_VOLCENGINE_RESOURCE_ID=volc.bigasr.sauc.duration
+```
+
+The AppID and Access Token come from the speech console's API key page. `volc.bigasr.sauc.duration` bills by audio hour and is the default; switch to `volc.bigasr.sauc.concurrent` only when the account holds a concurrency package. Optional boosting (hotword) and correct tables created in the console improve domain terms; both must exist in the same account.
 
 ### DashScope
 
