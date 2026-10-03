@@ -47,12 +47,20 @@
       { "binding": "DATA_EXPORT_QUEUE", "queue": "flaremo-data-export" }
     ],
     "consumers": [
-      { "queue": "flaremo-member-removal", "max_batch_size": 10, "max_retries": 5 },
+      {
+        "queue": "flaremo-member-removal",
+        "max_batch_size": 10,
+        "max_retries": 5
+      },
       { "queue": "flaremo-data-export", "max_batch_size": 5, "max_retries": 5 }
     ]
   },
   "ratelimits": [
-    { "name": "RATE_LIMITER", "namespace_id": "1001", "simple": { "limit": 30, "period": 60 } }
+    {
+      "name": "RATE_LIMITER",
+      "namespace_id": "1001",
+      "simple": { "limit": 30, "period": 60 }
+    }
   ],
   "vectorize": [
     {
@@ -67,9 +75,7 @@
   "ai": {
     "binding": "AI"
   },
-  "routes": [
-    { "pattern": "flaremo.48kr.top/*", "zone_name": "48kr.top" }
-  ],
+  "routes": [{ "pattern": "flaremo.48kr.top/*", "zone_name": "48kr.top" }],
   "triggers": {
     "crons": ["17 3 * * *"]
   },
