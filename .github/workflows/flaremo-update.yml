@@ -70,22 +70,36 @@ jobs:
 
           git remote add flaremo-upstream "https://github.com/${UPSTREAM_REPOSITORY}.git"
           git fetch --no-tags flaremo-upstream \
+            "refs/tags/v${current_version}:refs/tags/v${current_version}" \
             "refs/tags/${target_version}:refs/tags/${target_version}"
 
           update_branch="flaremo-update/${target_version}"
+          existing_pr="$(gh pr list --head "${update_branch}" --state open --json url --jq '.[0].url // empty')"
+          if [[ -n "${existing_pr}" ]]; then
+            echo "Update pull request already exists: ${existing_pr}"
+            exit 0
+          fi
           git config user.name "flaremo-update[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -C "${update_branch}" "origin/${BASE_BRANCH}"
 
-          # Real three-way merge instead of a tag-to-tag patch: the merge base
-          # is the true common ancestor, so a deployment repository that already
-          # contains upstream commits from between release tags merges cleanly
-          # instead of double-applying overlapping changes.
-          if ! git merge --no-edit -m "Update FlareMo from v${current_version} to ${target_version}" "${target_version}"; then
-            git merge --abort || true
-            echo "The deployment repository conflicts with ${target_version}. Resolve the update manually." >&2
+          # Apply only release-to-release business changes; deployment overrides
+          # and all workflows remain local. No dependency on upstream ancestry.
+          update_patch="$(mktemp)"
+          git diff --binary --full-index "v${current_version}" "${target_version}" -- \
+            . ':(exclude).github/workflows/**' ':(exclude).gitignore' \
+            ':(exclude)wrangler.jsonc' > "${update_patch}"
+          if ! git apply --3way --index "${update_patch}"; then
+            echo "Release patch conflicts; main was not changed. Resolve manually." >&2
             exit 1
           fi
+          rm "${update_patch}"
+          git diff --cached --exit-code -- .github/workflows .gitignore wrangler.jsonc
+          if git diff --cached --quiet; then
+            echo "Unexpected empty upgrade patch." >&2
+            exit 1
+          fi
+          git commit -m "Update FlareMo from v${current_version} to ${target_version}"
 
           merged_version="$(node -p "JSON.parse(require('node:fs').readFileSync('package.json', 'utf8')).version")"
           if [[ "${target_number}" != "${merged_version}" ]]; then
@@ -104,7 +118,7 @@ jobs:
             exit 0
           fi
 
-          pr_body="A new stable FlareMo release is available. Review the release notes and merge this pull request to let Cloudflare Workers Builds deploy it.
+          pr_body="A new stable FlareMo release is available. Review changes, D1 migrations and resource bindings before merging. This PR does not deploy production; run the validated Cloudflare deployment separately after merge.
 
           Release notes: https://github.com/${UPSTREAM_REPOSITORY}/releases/tag/${target_version}"
           gh pr create \
