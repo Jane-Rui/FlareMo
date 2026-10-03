@@ -74,6 +74,11 @@ jobs:
             "refs/tags/${target_version}:refs/tags/${target_version}"
 
           update_branch="flaremo-update/${target_version}"
+          existing_pr="$(gh pr list --head "${update_branch}" --state open --json url --jq '.[0].url // empty')"
+          if [[ -n "${existing_pr}" ]]; then
+            echo "Update pull request already exists: ${existing_pr}"
+            exit 0
+          fi
           git config user.name "flaremo-update[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -C "${update_branch}" "origin/${BASE_BRANCH}"
@@ -113,7 +118,7 @@ jobs:
             exit 0
           fi
 
-          pr_body="A new stable FlareMo release is available. Review the release notes and merge this pull request to let Cloudflare Workers Builds deploy it.
+          pr_body="A new stable FlareMo release is available. Review changes, D1 migrations and resource bindings before merging. This PR does not deploy production; run the validated Cloudflare deployment separately after merge.
 
           Release notes: https://github.com/${UPSTREAM_REPOSITORY}/releases/tag/${target_version}"
           gh pr create \
