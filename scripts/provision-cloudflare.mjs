@@ -451,7 +451,11 @@ function wrangler(args, { allowFailure = false } = {}) {
       stdio: ["pipe", "pipe", "pipe"],
     },
   );
-  const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+  // Successful --json commands keep stderr diagnostics out of the JSON parser.
+  const output =
+    result.status === 0 && args.includes("--json")
+      ? (result.stdout ?? "")
+      : `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
   if (result.status !== 0 && !allowFailure) {
     return { status: result.status ?? 1, output };
   }
