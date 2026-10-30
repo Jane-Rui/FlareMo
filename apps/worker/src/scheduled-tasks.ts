@@ -1,8 +1,10 @@
+import { thumbnailKeyFor } from "@flaremo/contracts/constants";
 import { createDb, memosNotifications, tasks } from "@flaremo/db";
 import {
   beginFlaremoMemberRemoval,
   claimMemberRemovalJob,
   createDailyReviewNotifications,
+  createDueTodayTaskNotifications,
   createOverdueTaskNotifications,
   deleteExpiredDataTasks,
   dispatchEmbeddingOutbox,
@@ -19,9 +21,11 @@ import {
   listAttachmentCleanupCandidates,
   listExpiredTrashedArticles,
   listExpiredTrashedMemos,
+  listQueuedDataExportTasks,
   listQueuedMemberRemovalJobs,
   MEMOS_SSE_RETENTION_MS,
   markArticleAttachmentsDeleting,
+  nextDayKey,
   type PlanLimits,
   type PushKeys,
   parseUserPlanLimits,
@@ -36,7 +40,7 @@ import {
   type UserPlanLimits,
   updateMemberRemovalJob,
 } from "@flaremo/domain";
-import { and, eq, inArray, isNull, lt, sql } from "drizzle-orm";
+import { and, eq, gte, inArray, isNull, lt, sql } from "drizzle-orm";
 import { cleanupFlaremoArtifacts } from "./artifact-cleanup";
 import { createEmbeddingProvider, createVectorIndex } from "./embedding";
 import type { FlareMoEnv } from "./env";
@@ -68,25 +72,24 @@ function parseTrashRetentionDays(value: string | undefined): number {
   return Math.min(parsed, 365);
 }
 
-export async function runScheduledMaintenance(
+type QueuedMaintenanceIds = {
+  removalJobIds: string[];
+  exportTaskIds: string[];
+};
+
+/**
+ * Execute member-removal jobs selected by either the cron reconciler or a
+ * Queue batch. Queue callers must propagate failures so the platform retries;
+ * cron callers continue after recording a failed job and remain the recovery
+ * path for interrupted work.
+ */
+async function runMemberRemovalJobs(
+  db: ReturnType<typeof createDb>,
   env: FlareMoEnv,
-  scheduledTime: number,
-  options: {
-    limits?: PlanLimits;
-    userLimits?: UserPlanLimits | null;
-    resolveUserLimits?: (
-      userId: string,
-    ) => Promise<UserPlanLimits | null> | UserPlanLimits | null;
-    removalJobIds?: string[];
-    exportTaskIds?: string[];
-  } = {},
+  jobs: Awaited<ReturnType<typeof getQueuedMemberRemovalJobsByIds>>,
+  propagateFailures: boolean,
 ): Promise<void> {
-  const db = createDb(env.DB);
-  await requeueStaleMemberRemovalJobs(db, scheduledTime);
-  const removalJobs = options.removalJobIds
-    ? await getQueuedMemberRemovalJobsByIds(db, options.removalJobIds)
-    : await listQueuedMemberRemovalJobs(db);
-  for (const job of removalJobs) {
+  for (const job of jobs) {
     try {
       if (!(await claimMemberRemovalJob(db, job.id))) continue;
       await updateMemberRemovalJob(db, job.id, {
@@ -108,15 +111,19 @@ export async function runScheduledMaintenance(
         "scheduled_member_removal_failed",
         error instanceof Error ? error.message : "Member removal failed",
       ).catch(() => undefined);
-      // Propagate the failure so Queue does not acknowledge the batch. The
-      // platform can then apply its configured retry policy.
-      if (options.removalJobIds) throw error;
+      if (propagateFailures) throw error;
     }
   }
-  // Queued data-export tasks (DATA_EXPORT_QUEUE messages) run through the
-  // same idempotent executor as the in-request path: only `queued` rows are
-  // claimed, so a redelivered or doubled message is a no-op.
-  for (const taskId of options.exportTaskIds ?? []) {
+}
+
+/** Execute export jobs selected by a Queue batch or the cron reconciler. */
+async function runExportTasks(
+  env: FlareMoEnv,
+  db: ReturnType<typeof createDb>,
+  taskIds: string[],
+  propagateFailures: boolean,
+): Promise<void> {
+  for (const taskId of taskIds) {
     try {
       await runDataExportTask(env, db, taskId);
     } catch (error) {
@@ -126,11 +133,60 @@ export async function runScheduledMaintenance(
         "export_task_failed",
         error instanceof Error ? error.message : "Export failed",
       ).catch(() => undefined);
-      // Propagate the failure so Queue does not acknowledge the batch. The
-      // platform can then apply its configured retry policy.
-      if (options.exportTaskIds) throw error;
+      if (propagateFailures) throw error;
     }
   }
+}
+
+/**
+ * Queue consumer path. It deliberately executes only the jobs named by the
+ * delivered messages. The scheduled handler below remains the bounded
+ * reconciler for stale or missed jobs and owns the full maintenance sweep.
+ */
+export async function runQueuedJobs(
+  env: FlareMoEnv,
+  ids: QueuedMaintenanceIds,
+): Promise<void> {
+  const db = createDb(env.DB);
+  const removalJobs = await getQueuedMemberRemovalJobsByIds(
+    db,
+    ids.removalJobIds,
+  );
+  await runMemberRemovalJobs(db, env, removalJobs, true);
+  await runExportTasks(env, db, ids.exportTaskIds, true);
+}
+
+export async function runScheduledMaintenance(
+  env: FlareMoEnv,
+  scheduledTime: number,
+  options: {
+    limits?: PlanLimits;
+    userLimits?: UserPlanLimits | null;
+    resolveUserLimits?: (
+      userId: string,
+    ) => Promise<UserPlanLimits | null> | UserPlanLimits | null;
+    removalJobIds?: string[];
+    exportTaskIds?: string[];
+  } = {},
+): Promise<void> {
+  const db = createDb(env.DB);
+  await requeueStaleMemberRemovalJobs(db, scheduledTime);
+  const removalJobs = options.removalJobIds
+    ? await getQueuedMemberRemovalJobsByIds(db, options.removalJobIds)
+    : await listQueuedMemberRemovalJobs(db);
+  await runMemberRemovalJobs(
+    db,
+    env,
+    removalJobs,
+    Boolean(options.removalJobIds),
+  );
+  // Queued data-export tasks (DATA_EXPORT_QUEUE messages) run through the
+  // same idempotent executor as the in-request path: only `queued` rows are
+  // claimed, so a redelivered or doubled message is a no-op.
+  const exportTaskIds = options.exportTaskIds
+    ? options.exportTaskIds
+    : (await listQueuedDataExportTasks(db)).map((task) => task.id);
+  await runExportTasks(env, db, exportTaskIds, Boolean(options.exportTaskIds));
   await dispatchMemosWebhookOutbox(db);
   // Memory-ledger upkeep runs before the embedding outbox so the vector work it
   // queues is drained by the same pass: stale conjectures retire, and rows whose
@@ -194,7 +250,13 @@ export async function runScheduledMaintenance(
   for (let batch = 0; batch < MAX_ATTACHMENT_CLEANUP_BATCHES; batch++) {
     const candidates = await listAttachmentCleanupCandidates(db, orphanCutoff);
     if (candidates.length === 0) break;
-    const objectKeys = candidates.map((attachment) => attachment.r2Key);
+    // Originals plus their derived previews; a preview's key is the original
+    // with a fixed suffix, so it is not discoverable by a later sweep.
+    const objectKeys = candidates.flatMap((attachment) =>
+      attachment.payload?.thumbnail === true
+        ? [attachment.r2Key, thumbnailKeyFor(attachment.r2Key)]
+        : [attachment.r2Key],
+    );
     await env.ATTACHMENTS.delete(objectKeys);
     await finalizeAttachmentCleanupForIds(
       db,
@@ -235,8 +297,10 @@ export async function runScheduledMaintenance(
         owner,
         articleId,
       );
-      const objectKeys = articleAttachments.map(
-        (attachment) => attachment.r2Key,
+      const objectKeys = articleAttachments.flatMap((attachment) =>
+        attachment.payload?.thumbnail === true
+          ? [attachment.r2Key, thumbnailKeyFor(attachment.r2Key)]
+          : [attachment.r2Key],
       );
       if (objectKeys.length > 0) {
         await env.ATTACHMENTS.delete(objectKeys);
@@ -296,6 +360,10 @@ export async function runScheduledMaintenance(
   const overdueNotificationCount = await createOverdueTaskNotifications(db, {
     date: reviewDate,
   });
+  // Dated to-dos remind on their day: one row per task due today.
+  const dueTodayNotificationCount = await createDueTodayTaskNotifications(db, {
+    date: reviewDate,
+  });
   // Fire the Web Push reminders alongside the notification rows. Push stays
   // disabled end-to-end without both VAPID keys; failures never affect the
   // notification rows.
@@ -340,6 +408,29 @@ export async function runScheduledMaintenance(
         url: "/projects",
       }).catch(() => undefined);
     }
+    // The day a dated to-do falls due, one aggregate push per user.
+    const dueTodayByUser = await db
+      .select({
+        userId: tasks.userId,
+        count: sql<number>`count(*)`.mapWith(Number),
+      })
+      .from(tasks)
+      .where(
+        and(
+          isNull(tasks.deletedAt),
+          gte(tasks.dueAt, reviewDate),
+          lt(tasks.dueAt, nextDayKey(reviewDate)),
+          inArray(tasks.status, ["todo", "in_progress"]),
+        ),
+      )
+      .groupBy(tasks.userId);
+    for (const row of dueTodayByUser) {
+      await pushNotificationToUser(db, pushKeys, row.userId, {
+        title: "FlareMo 今日待办",
+        body: `今天有 ${row.count} 项待办到期。`,
+        url: "/projects",
+      }).catch(() => undefined);
+    }
   }
   console.log(
     JSON.stringify({
@@ -351,6 +442,7 @@ export async function runScheduledMaintenance(
       expiredTaskCount: expiredIds.length,
       reviewNotificationCount,
       overdueNotificationCount,
+      dueTodayNotificationCount,
       scheduledTime,
     }),
   );
