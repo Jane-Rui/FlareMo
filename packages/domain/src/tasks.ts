@@ -10,7 +10,14 @@ import { taskActivity, tasks } from "@flaremo/db";
 import { and, asc, eq, gt, gte, inArray, isNull, lt, or } from "drizzle-orm";
 import { NotFoundError, ValidationError } from "./errors";
 import { createResourceId, parseResourceName } from "./ids";
+import { setMemoTaskLineState } from "./memo-task-sync";
+import { getMemoById } from "./memos-read";
+import { updateMemo } from "./memos-write";
 import { requireProject } from "./projects";
+
+// D1 caps bound parameters per statement at 100. Leave room for the cutoff
+// predicate that is repeated on delete after the initial candidate read.
+const HARD_DELETE_BATCH_SIZE = 96;
 
 /**
  * The actor behind a task mutation. Browser sessions are the owner; PATs
@@ -28,6 +35,8 @@ export type ListTasksOptions = {
   dueFrom?: string | null;
   /** Inclusive upper bound on `due_at` (YYYY-MM-DD). */
   dueTo?: string | null;
+  /** Only tasks scheduled from this memo (`memos/<id>` or a bare id). */
+  sourceMemoId?: string | null;
   /** Recycle bin: include soft-deleted tasks. */
   includeDeleted?: boolean;
   pageSize?: number;
@@ -220,6 +229,11 @@ export async function listTasks(
   if (input.priority) filters.push(eq(tasks.priority, input.priority));
   if (input.dueFrom) filters.push(gte(tasks.dueAt, input.dueFrom));
   if (input.dueTo) filters.push(lt(tasks.dueAt, nextDayKey(input.dueTo)));
+  if (input.sourceMemoId) {
+    filters.push(
+      eq(tasks.sourceMemoId, normalizeSourceMemoId(input.sourceMemoId) ?? ""),
+    );
+  }
   const cursor = input.pageToken
     ? decodeTaskPageToken(input.pageToken)
     : undefined;
@@ -385,7 +399,36 @@ export async function updateTask(
     : "updated";
   await appendActivity(db, user, actor, id, action, changes);
 
+  const wasDone = existing.status === "done";
+  const isDone = next.status === "done";
+  if (statusChanged && wasDone !== isDone && next.sourceMemoId) {
+    await syncSourceMemoLine(db, user, next.sourceMemoId, next.title, isDone);
+  }
+
   return taskToDto(await requireTask(db, user, id));
+}
+
+/**
+ * Completing (or reopening) a task ticks the matching to-do line in the memo
+ * it came from. Best effort: a memo that is gone, no longer the caller's to
+ * edit, or no longer carries the line simply stays as it is.
+ */
+async function syncSourceMemoLine(
+  db: FlareMoDb,
+  user: UserRow,
+  memoId: string,
+  title: string,
+  checked: boolean,
+) {
+  try {
+    const memo = await getMemoById(db, user, memoId);
+    if (memo.userId !== user.id || memo.status === "trashed") return;
+    const content = setMemoTaskLineState(memo.content, title, checked);
+    if (content === null) return;
+    await updateMemo(db, user, memoId, { content });
+  } catch {
+    // The task update stands on its own.
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -516,14 +559,31 @@ export async function hardDeleteExpiredTasks(
   db: FlareMoDb,
   cutoff: string,
 ): Promise<number> {
-  const expired = await db
-    .select({ id: tasks.id })
-    .from(tasks)
-    .where(lt(tasks.deletedAt, cutoff));
-  for (const { id } of expired) {
-    await db.delete(tasks).where(eq(tasks.id, id));
+  let deleted = 0;
+  while (true) {
+    const expired = await db
+      .select({ id: tasks.id })
+      .from(tasks)
+      .where(lt(tasks.deletedAt, cutoff))
+      .limit(HARD_DELETE_BATCH_SIZE)
+      .all();
+    if (expired.length === 0) break;
+
+    const removed = await db
+      .delete(tasks)
+      .where(
+        and(
+          lt(tasks.deletedAt, cutoff),
+          inArray(
+            tasks.id,
+            expired.map((row) => row.id),
+          ),
+        ),
+      )
+      .returning({ id: tasks.id });
+    deleted += removed.length;
   }
-  return expired.length;
+  return deleted;
 }
 
 // ---------------------------------------------------------------------------
