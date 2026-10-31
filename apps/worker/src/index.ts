@@ -1,7 +1,5 @@
-import {
-  createCurrentOpenApiDocument,
-  createOpenApiDocument,
-} from "@flaremo/contracts";
+import { createOpenApiDocument } from "@flaremo/contracts/openapi";
+import { createCurrentOpenApiDocument } from "@flaremo/contracts/openapi-current";
 import { createDb } from "@flaremo/db";
 import {
   dispatchEmbeddingOutbox,
@@ -30,7 +28,7 @@ import { betterAuthRateLimitBucket, rateLimitGuard } from "./rate-limit";
 
 // Cron/queue maintenance surface moved to its own module; re-exported so the
 // original import path (./index) keeps serving it verbatim.
-export { runScheduledMaintenance } from "./scheduled-tasks";
+export { runQueuedJobs, runScheduledMaintenance } from "./scheduled-tasks";
 
 import { mountLazyRoute, mountLazySsrPages } from "./lazy-routes";
 import { accountApi } from "./routes/account-api";
@@ -52,7 +50,7 @@ import { pluginsStoreApi } from "./routes/plugins-store-api";
 import { projectsApi } from "./routes/projects-api";
 import { publicApi } from "./routes/public-api";
 import { tasksApi } from "./routes/tasks-api";
-import { runScheduledMaintenance } from "./scheduled-tasks";
+import { runQueuedJobs, runScheduledMaintenance } from "./scheduled-tasks";
 import { isKnownFrontendPath } from "./spa-routes";
 
 /**
@@ -90,6 +88,23 @@ function resolveFlareMoOptions(
       options.resolveUserPlanLimits ??
       ((env: FlareMoEnv) => parseUserPlanLimits(env.FLAREMO_USER_LIMITS_JSON)),
   };
+}
+
+// The documents are pure data built from literals; caching them keeps
+// /openapi.json from re-allocating a few thousand objects per request.
+let legacyOpenApiDocument: ReturnType<typeof createOpenApiDocument> | undefined;
+let currentOpenApiDocument:
+  | ReturnType<typeof createCurrentOpenApiDocument>
+  | undefined;
+
+function getLegacyOpenApiDocument() {
+  legacyOpenApiDocument ??= createOpenApiDocument();
+  return legacyOpenApiDocument;
+}
+
+function getCurrentOpenApiDocument() {
+  currentOpenApiDocument ??= createCurrentOpenApiDocument();
+  return currentOpenApiDocument;
 }
 
 export function createFlareMoApp(
@@ -328,8 +343,8 @@ export function createFlareMoApp(
   app.get("/openapi.json", (c) =>
     c.json(
       isLegacyWireRequest(c)
-        ? createOpenApiDocument()
-        : createCurrentOpenApiDocument(),
+        ? getLegacyOpenApiDocument()
+        : getCurrentOpenApiDocument(),
     ),
   );
   app.get("/api/v1/openapi.json", async (c) => {
@@ -337,8 +352,8 @@ export function createFlareMoApp(
       await getRequestContext(c);
       return c.json(
         isLegacyWireRequest(c)
-          ? createOpenApiDocument()
-          : createCurrentOpenApiDocument(),
+          ? getLegacyOpenApiDocument()
+          : getCurrentOpenApiDocument(),
       );
     } catch (error) {
       return jsonError(c, error);
@@ -349,7 +364,36 @@ export function createFlareMoApp(
     if (c.req.path.startsWith("/api/")) {
       return c.json({ error: { message: "Not found" } }, 404);
     }
-    return c.env.ASSETS.fetch(c.req.raw).then((response) => {
+    return c.env.ASSETS.fetch(c.req.raw).then(async (response) => {
+      // `not_found_handling: "none"` (the default config since v0.23):
+      // navigations that match no asset file reach this handler and the
+      // ASSETS binding answers 404 with no body. Serve the SPA shell here —
+      // 200 for known frontend routes, 404 for everything else — so unknown
+      // URLs stop being soft-404s. Configs still on
+      // "single-page-application" never get here for navigations and keep
+      // the old behavior. Paths with a file extension stay plain 404s: a
+      // missing script or image must not come back as HTML.
+      if (
+        response.status === 404 &&
+        (c.req.method === "GET" || c.req.method === "HEAD") &&
+        !/\.[A-Za-z0-9]+$/.test(c.req.path)
+      ) {
+        // Conditional headers would let ASSETS answer 304 for the shell,
+        // which cannot carry the 404 status this path needs.
+        const headers = new Headers(c.req.raw.headers);
+        headers.delete("if-none-match");
+        headers.delete("if-modified-since");
+        const shell = await c.env.ASSETS.fetch(
+          new Request(new URL("/", c.req.url), { headers }),
+        );
+        if (shell.ok) {
+          return new Response(shell.body, {
+            status: isKnownFrontendPath(c.req.path) ? 200 : 404,
+            statusText: isKnownFrontendPath(c.req.path) ? "OK" : "Not Found",
+            headers: shell.headers,
+          });
+        }
+      }
       // Vite asset filenames contain a content hash. They are safe to cache
       // for a year; HTML and application routes remain revalidated normally.
       if (/^\/assets\/[A-Za-z0-9._-]+-[A-Za-z0-9]{8,}\./.test(c.req.path)) {
@@ -417,8 +461,8 @@ function logBackgroundTaskFailure(task: string, error: unknown) {
 
 /**
  * The limits half of runScheduledMaintenance's options, resolved once per
- * lifecycle event. Scheduled and queue handlers used to each spell the same
- * three fields out inline.
+ * scheduled lifecycle event. Queue jobs do not run the maintenance passes
+ * that consume these limits.
  */
 async function maintenanceOptions(
   env: FlareMoEnv,
@@ -494,10 +538,11 @@ export function createFlareMoWorker(
     async queue(batch, env) {
       // Two message shapes share the consumer: {jobId} (member removal) and
       // {taskId} (data export). Both run through the same idempotent
-      // executor as scheduled maintenance so retries cannot diverge from
-      // the daily recovery path. A malformed body can never become valid on
-      // retry — drop it here so the batch ack removes the poison message
-      // instead of looping.
+      // executor as scheduled maintenance so retries cannot diverge from the
+      // daily recovery path. The queue path intentionally runs only these
+      // message-selected jobs; the scheduled handler owns the full sweep.
+      // A malformed body can never become valid on retry — drop it here so
+      // the batch ack removes the poison message instead of looping.
       const removalJobIds: string[] = [];
       const exportTaskIds: string[] = [];
       for (const message of batch.messages) {
@@ -512,12 +557,7 @@ export function createFlareMoWorker(
           );
         }
       }
-      await runScheduledMaintenance(env, Date.now(), {
-        ...(await maintenanceOptions(
-          env,
-          resolvedOptions,
-          hasCustomUserPlanLimits,
-        )),
+      await runQueuedJobs(env, {
         removalJobIds,
         exportTaskIds,
       });
