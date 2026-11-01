@@ -2,11 +2,17 @@
 
 这份文档描述 FlareMo 当前的架构方向。它是开源仓库里的结果型设计文档，不是过程记录。后续架构变化应直接修改本文原文。
 
-本地参考仓库放在 `Temp/` 下，并通过 `.gitignore` 排除在版本库之外：
+## 参考仓库
 
-- `Temp/MeowNocode`：来自 `XuYouo/MeowNocode`
-- `Temp/blinko`：来自 `blinkospace/blinko`
-- `Temp/memos`：来自 `usememos/memos`
+对标与参考对象是三个外部项目，**不随仓库分发**，需要时按下表重新克隆到 `Temp/`（该目录已在 `.gitignore` 中）：
+
+| 项目 | 来源 | 在 FlareMo 中的权重 |
+| --- | --- | --- |
+| `usememos/memos` | `git clone https://github.com/usememos/memos Temp/memos` | 模型、API 与兼容层的主参考 |
+| `blinkospace/blinko` | `git clone https://github.com/blinkospace/blinko Temp/blinko` | 功能参考（AI 检索、附件、引用、编辑器交互） |
+| `XuYouo/MeowNocode` | `git clone https://github.com/XuYouo/MeowNocode Temp/MeowNocode` | 轻量 Cloudflare/D1 笔记应用参考 |
+
+本文下面的权重判断、借鉴点与边界结论都已沉淀在此，克隆只是为了核对上游细节；只读结论不需要本地副本。
 
 ## 目标
 
@@ -484,4 +490,4 @@ FlareMo 的架构核心是：
 
 ## 主动语音记录
 
-Capture 复用 realtime-context 的浏览器 PCM / 流式 ASR 思路，将服务端适配移入 FlareMo Worker。浏览器以 Better Auth cookie 连接同源 `/api/app/capture/ws`，Worker 校验 Origin、持有腾讯云或 DashScope 凭据并转换事件。录音过程中的文字进入现有 IndexedDB 草稿；停止并确认后调用现有 Memo API，继续使用 D1、FTS 与可选 embedding pipeline。不新增语音数据库、第二套认证或 Python 服务。详细生命周期、音频处理和验收边界见 [Capture 设计](voice-capture-design.md)。
+Capture 复用 realtime-context 的浏览器 PCM / 流式 ASR 思路，将服务端适配移入 FlareMo Worker。浏览器以 Better Auth cookie 连接同源 `/api/app/capture/ws`，Worker 校验 Origin、持有腾讯云或 DashScope 凭据并转换事件。录音过程中的文字进入现有 IndexedDB 草稿；入口是输入框的麦克风按钮（独立的 `/capture` 页已在 v0.24.0 删除），转写文字插入草稿后随普通发送调用现有 Memo API，继续使用 D1、FTS 与可选 embedding pipeline。不新增语音数据库、第二套认证或 Python 服务。详细生命周期、音频处理和验收边界见 [Capture 设计](voice-capture-design.md)。

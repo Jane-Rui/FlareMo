@@ -6,8 +6,13 @@ import type {
 import type { FlareMoDb, ProjectRow, UserRow } from "@flaremo/db";
 import { projects, tasks } from "@flaremo/db";
 import { and, asc, count, eq, inArray, isNull, lt, sql } from "drizzle-orm";
+import { chunkForD1, d1IdsPerStatement } from "./d1-limits";
 import { NotFoundError, ValidationError } from "./errors";
 import { createResourceId } from "./ids";
+
+// D1 caps bound parameters per statement at 100. Leave room for the cutoff
+// predicate that is repeated on delete after the initial candidate read.
+const HARD_DELETE_BATCH_SIZE = 96;
 
 // ---------------------------------------------------------------------------
 // DTO mapping
@@ -274,27 +279,31 @@ export async function countTasksByProjects(
   const result = new Map<string, { total: number; open: number }>();
   if (projectIds.length === 0) return result;
 
-  const rows = await db
-    .select({
-      projectId: tasks.projectId,
-      total: count(),
-      open: sql<number>`SUM(CASE WHEN ${tasks.status} != 'done' THEN 1 ELSE 0 END)`.mapWith(
-        Number,
-      ),
-    })
-    .from(tasks)
-    .where(
-      and(
-        eq(tasks.userId, user.id),
-        isNull(tasks.deletedAt),
-        inArray(tasks.projectId, projectIds),
-      ),
-    )
-    .groupBy(tasks.projectId);
+  // One id = one bound parameter, plus the user predicate, so an account with
+  // more than ~99 projects would blow D1's per-statement cap here.
+  for (const idChunk of chunkForD1(projectIds, d1IdsPerStatement(2))) {
+    const rows = await db
+      .select({
+        projectId: tasks.projectId,
+        total: count(),
+        open: sql<number>`SUM(CASE WHEN ${tasks.status} != 'done' THEN 1 ELSE 0 END)`.mapWith(
+          Number,
+        ),
+      })
+      .from(tasks)
+      .where(
+        and(
+          eq(tasks.userId, user.id),
+          isNull(tasks.deletedAt),
+          inArray(tasks.projectId, idChunk),
+        ),
+      )
+      .groupBy(tasks.projectId);
 
-  for (const row of rows) {
-    if (row.projectId) {
-      result.set(row.projectId, { total: row.total, open: row.open ?? 0 });
+    for (const row of rows) {
+      if (row.projectId) {
+        result.set(row.projectId, { total: row.total, open: row.open ?? 0 });
+      }
     }
   }
   return result;
@@ -310,14 +319,33 @@ export async function hardDeleteExpiredProjects(
   db: FlareMoDb,
   cutoff: string,
 ): Promise<number> {
-  const expired = await db
-    .select({ id: projects.id })
-    .from(projects)
-    .where(lt(projects.deletedAt, cutoff));
-  for (const { id } of expired) {
-    await db.delete(projects).where(eq(projects.id, id));
+  let deleted = 0;
+  while (true) {
+    const expired = await db
+      .select({ id: projects.id })
+      .from(projects)
+      .where(lt(projects.deletedAt, cutoff))
+      .limit(HARD_DELETE_BATCH_SIZE)
+      .all();
+    if (expired.length === 0) break;
+
+    const removed = await db
+      .delete(projects)
+      .where(
+        and(
+          lt(projects.deletedAt, cutoff),
+          inArray(
+            projects.id,
+            expired.map((row) => row.id),
+          ),
+        ),
+      )
+      .returning({ id: projects.id });
+    // D1 meta.changes includes cascaded task/activity rows; count only the
+    // root projects returned by this delete.
+    deleted += removed.length;
   }
-  return expired.length;
+  return deleted;
 }
 
 function escapeLike(value: string): string {

@@ -70,7 +70,7 @@ export function WeekHorizonPureView({
                   <>
                     <span
                       className={cn(
-                        "text-[10px] font-medium leading-none mb-0.5 transition-colors",
+                        "text-xs font-medium leading-none mb-0.5 transition-colors",
                         isSelected || isToday
                           ? "text-brand-600 dark:text-brand-400 font-semibold"
                           : "text-muted-foreground",
@@ -110,7 +110,7 @@ export function WeekHorizonPureView({
       {/* 7 Columns x 24 Rows Grid (168 Pure Squares, 100% 对齐年视图微点质感与深浅) */}
       <div className="flex gap-1">
         {/* Left Y-axis hour scale indicators (00, 06, 12, 18, 23) */}
-        <div className="flex w-4 shrink-0 flex-col justify-between py-0.5 text-[8.5px] font-mono font-medium text-foreground/75 dark:text-foreground/70 select-none">
+        <div className="flex w-4 shrink-0 flex-col justify-between py-0.5 text-[9px] font-mono font-medium text-foreground/75 dark:text-foreground/70 select-none">
           <span>00</span>
           <span>06</span>
           <span>12</span>
@@ -124,25 +124,26 @@ export function WeekHorizonPureView({
             <div className="flex flex-col gap-[2px]" key={`col-${d.key}`}>
               {hours.map((h) => {
                 const count = countMap.get(`${d.key}_${h}`) ?? 0;
+                const tip = `${d.key} ${String(h).padStart(2, "0")}:00 · ${t("explorer.notesCount", { count })}`;
                 return (
                   <button
+                    aria-label={tip}
                     className={cn(
                       "h-[7px] w-full rounded-[1.5px] transition-all cursor-pointer active:scale-95",
                       heatmapColor(count),
                       count > 0 && "hover:brightness-110",
                       count <= 0 &&
                         "hover:bg-muted-foreground/25 dark:hover:bg-muted/45",
-                      isLoading && "animate-pulse",
+                      isLoading && "opacity-50",
+                      "outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
                       "hover:scale-110 hover:z-10",
                     )}
                     key={`${d.key}_${h}`}
                     type="button"
                     onClick={() => onDrillToDay(d.key)}
-                    onMouseEnter={() =>
-                      onHoverTip(
-                        `${d.key} ${String(h).padStart(2, "0")}:00 · ${t("explorer.notesCount", { count })}`,
-                      )
-                    }
+                    onFocus={() => onHoverTip(tip)}
+                    onBlur={() => onHoverTip(null)}
+                    onMouseEnter={() => onHoverTip(tip)}
                     onMouseLeave={() => onHoverTip(null)}
                   />
                 );
