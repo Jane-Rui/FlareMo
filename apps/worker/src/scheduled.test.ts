@@ -8,6 +8,7 @@ import {
   pushSubscriptions,
 } from "@flaremo/db";
 import {
+  createDataTask,
   createMemo,
   createProject,
   createResourceId,
@@ -22,7 +23,7 @@ import { eq } from "drizzle-orm";
 import { Miniflare } from "miniflare";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FlareMoEnv } from "./env";
-import { runScheduledMaintenance } from "./index";
+import { runQueuedJobs, runScheduledMaintenance } from "./index";
 
 const NOW = Date.parse("2026-09-15T03:00:00.000Z");
 
@@ -38,8 +39,16 @@ class FakeR2Bucket {
   objects = new Set<string>();
   deletedKeys: string[][] = [];
   listPrefixes: string[] = [];
+  failPut = false;
+  failDelete = false;
+
+  async put(key: string) {
+    if (this.failPut) throw new Error("R2 put failed");
+    this.objects.add(key);
+  }
 
   async delete(keys: string | string[]) {
+    if (this.failDelete) throw new Error("R2 delete failed");
     const list = Array.isArray(keys) ? keys : [keys];
     this.deletedKeys.push(list);
     for (const key of list) this.objects.delete(key);
@@ -114,6 +123,71 @@ describe("scheduled maintenance", () => {
 
   afterEach(async () => {
     await mf.dispose();
+  });
+
+  it("runs only message-selected jobs in the Queue path", async () => {
+    const queued = await createDataTask(db, user, { kind: "export" });
+    const cronOnly = await createDataTask(db, user, { kind: "export" });
+    await db
+      .update(dataTasks)
+      .set({ createdAt: "2026-01-01T00:00:00.000Z" })
+      .where(eq(dataTasks.id, cronOnly.id));
+
+    await runQueuedJobs(env, {
+      removalJobIds: [],
+      exportTaskIds: [queued.id],
+    });
+
+    const queuedAfter = await db
+      .select()
+      .from(dataTasks)
+      .where(eq(dataTasks.id, queued.id))
+      .get();
+    const cronOnlyAfter = await db
+      .select()
+      .from(dataTasks)
+      .where(eq(dataTasks.id, cronOnly.id))
+      .get();
+    expect(queuedAfter?.status).toBe("succeeded");
+    // Full cron maintenance would delete this row by its old created_at;
+    // Queue delivery must leave unrelated maintenance work untouched.
+    expect(cronOnlyAfter?.id).toBe(cronOnly.id);
+  });
+
+  it("propagates Queue failures and keeps cron recovery available", async () => {
+    const failed = await createDataTask(db, user, { kind: "export" });
+    r2.failPut = true;
+    await expect(
+      runQueuedJobs(env, { removalJobIds: [], exportTaskIds: [failed.id] }),
+    ).rejects.toThrow("R2 put failed");
+    expect(
+      (
+        await db
+          .select()
+          .from(dataTasks)
+          .where(eq(dataTasks.id, failed.id))
+          .get()
+      )?.status,
+    ).toBe("failed");
+
+    // A redelivery of a failed export is an idempotent no-op rather than a
+    // second write, while an unrelated queued export remains cron-recoverable.
+    r2.failPut = false;
+    await runQueuedJobs(env, {
+      removalJobIds: [],
+      exportTaskIds: [failed.id],
+    });
+    const cronFallback = await createDataTask(db, user, { kind: "export" });
+    await runScheduledMaintenance(env, NOW);
+    expect(
+      (
+        await db
+          .select()
+          .from(dataTasks)
+          .where(eq(dataTasks.id, cronFallback.id))
+          .get()
+      )?.status,
+    ).toBe("succeeded");
   });
 
   it("purges expired trash with its attachments and sweeps orphaned ones", async () => {
@@ -211,6 +285,50 @@ describe("scheduled maintenance", () => {
     rows = await db.select().from(memosNotifications);
     expect(rows.filter((row) => row.type === "daily_review")).toHaveLength(1);
     expect(rows.filter((row) => row.type === "task_overdue")).toHaveLength(1);
+  });
+
+  it("keeps later maintenance steps running when an earlier step fails", async () => {
+    const anchor = await createMemo(db, user, {
+      content: "a year ago today",
+      visibility: "private",
+      source: "web",
+    });
+    await db
+      .update(memos)
+      .set({ createdAt: "2025-09-15T10:00:00.000Z" })
+      .where(eq(memos.id, anchor.id));
+    await insertAttachment(db, user.id, {
+      createdAt: new Date(NOW - 10 * 86_400_000).toISOString(),
+    });
+
+    r2.failDelete = true;
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const errorSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+    try {
+      await runScheduledMaintenance(env, NOW);
+    } finally {
+      r2.failDelete = false;
+    }
+
+    const summaryLine = logSpy.mock.calls
+      .map((call) => String(call[0]))
+      .find((line) => line.includes("scheduled maintenance complete"));
+    const summary = JSON.parse(summaryLine ?? "{}") as {
+      ok?: boolean;
+      failedSteps?: string[];
+    };
+    // The R2 delete failure is contained to the attachment step; every pass
+    // after it still runs.
+    expect(summary.ok).toBe(false);
+    expect(summary.failedSteps).toContain("attachment-gc");
+    expect(errorSpy).toHaveBeenCalled();
+    const rows = await db.select().from(memosNotifications);
+    expect(rows.filter((row) => row.type === "daily_review")).toHaveLength(1);
+
+    logSpy.mockRestore();
+    errorSpy.mockRestore();
   });
 
   it("expires stale data tasks and garbage-collects their export artifacts", async () => {
