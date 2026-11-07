@@ -21,18 +21,24 @@
 
 ## docs 镜像
 
-`src/lib/docs-source.generated.ts` 静态导入 `../../../../docs/*.md` 与 `../../../../docs/en/*.md`，由 Vite `?raw` 打包。新增/修改文档后：
+`src/lib/docs-source.generated.ts` 保留文档元数据，并为每篇正文提供 `import(...?raw)` 异步 loader；详情路由加载器会在渲染前等待对应正文，因此首页入口不会携带全部 Markdown。新增/修改文档后：
 
 ```bash
 pnpm --filter @flaremo/site build
 ```
 
-确保新 slug 出现在 `src/lib/docs-source.generated.ts`（`?raw` import + `ZH_DOCS`/`EN_DOCS` 条目），以及 `scripts/build.mjs` 顶部的 `DOC_SLUGS`（`getAllPaths()` 按它展开预渲染路径）。英文条目加 `fallbackFromZh: true` 时回退中文正文，详情页顶部显示"翻译待补"提示条（`src/pages/docs-detail-page.tsx`）。
+确保新 slug 出现在 `src/lib/docs-source.generated.ts` 的 `ZH_DOCS`/`EN_DOCS` 元数据条目（正文 loader 使用 `?raw`），以及 `scripts/build.mjs` 顶部的 `DOC_SLUGS`。后者是 SSG 的唯一预渲染 slug 清单，`getAllPaths()` 会将全部 slug 展开到 8 个 locale。英文条目加 `fallbackFromZh: true` 时回退中文正文，详情页顶部显示"翻译待补"提示条（`src/pages/docs-detail-page.tsx`）。
+
+## 社交卡片与「真实界面」素材
+
+- `public/og-image.png`（1200×630）由 `pnpm og:image` 生成：脚本把品牌 mark、Geist 字体与首屏截图内联进 HTML 再截图，素材变化后重跑一次并提交 PNG。不要再改回 SVG——X、Slack、LinkedIn 等抓取器不渲染 SVG 预览。
+- `public/screenshots/` 是首页「A look inside」用的真实界面截图（EN/ZH × 亮/暗/移动端）。来源是本地起 dev server + Playwright 注入 `flaremo.locale`/登录态后截图，然后用 `cwebp -q 82` 转 webp；不要放回模拟图或旧版本截图。
+- `scripts/build.mjs` 会额外产出 `dist/site/404.html`（`wrangler.jsonc` 的 `not_found_handling: "404-page"` 靠它返回带样式的 404，缺了就是白屏）。
 
 ## SEO
 
 - 每个路由的 SEO meta（title / description / og / twitter / canonical / hreflang / JSON-LD）在 `src/content/static-page-meta.ts` 的 `STATIC_PAGE_META` 注册；`src/ssr-render.tsx` 按 pathname 取 meta 交给 `src/lib/html-shell.ts` 的 `buildSeoForPath`（包装 `src/lib/seo.ts` 的 `buildSeoHead`）生成 `<head>` 内容。
-- `src/lib/html-shell.ts` 的 `renderHtmlShell` 生成完整 `<head>`；`src/ssr-render.tsx` 用 `createMemoryHistory` + `router.load()` + `renderToString` 渲染 body。
+- `src/lib/html-shell.ts` 的 `renderHtmlShell` 生成完整 `<head>`；`src/ssr-render.tsx` 用 `createMemoryHistory` + `router.load()` + `renderToString` 渲染 body。404 走 `/__404` 渲染到 `404.html`，meta 带 `noindex`。
 - `scripts/build.mjs` 构建时自动产出 `sitemap.xml` 与 `robots.txt`（后者在 `public/`）。
 
 ## 命令
@@ -48,7 +54,7 @@ pnpm deploy:site             # 部署到 flaremo.app
 
 部署后必须检查：
 
-- `https://flaremo.app/`、`/en/`、`/pricing`、`/en/pricing`、`/docs/`、`/en/docs/`、`/docs/<slug>`、`/en/docs/<slug>` 全部 200
+- `https://flaremo.app/`、`/en/`、`/docs/`、`/en/docs/`、至少一个 `/docs/<slug>/` 与 `/en/docs/<slug>/` 全部 200；其余 locale 前缀也应命中 `scripts/build.mjs` 生成的路径
 - `view-source:` 看到完整 head（og、hreflang、JSON-LD）+ 非空 body
 - `https://flaremo.app/sitemap.xml` 与 `/robots.txt` 可访问
 - Lighthouse Performance ≥ 90（SSG 静态 HTML 首字节即有内容）
