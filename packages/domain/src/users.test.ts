@@ -1,5 +1,8 @@
+import { importBundleSchema } from "@flaremo/contracts";
 import {
   applyFlaremoMigrations,
+  authMembers,
+  authOrganizations,
   authUsers,
   createDb,
   memos,
@@ -10,10 +13,16 @@ import {
 import { eq } from "drizzle-orm";
 import { Miniflare } from "miniflare";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { completeOwnerBootstrap, getViewerTeamMembership } from "./auth";
+import {
+  completeOwnerBootstrap,
+  getViewerTeamMembership,
+  listFlaremoUsersWithMemberships,
+} from "./auth";
 import { ConflictError, ForbiddenError, ValidationError } from "./errors";
+import { importData } from "./import-export";
 import { readHourlyCountTotals } from "./memo-hourly-counts";
 import { createMemo } from "./memos";
+import { createMemoComment } from "./memos-comments";
 import type { TeamViewer } from "./team-permissions";
 import {
   beginFlaremoMemberRemoval,
@@ -184,6 +193,70 @@ describe("team users", () => {
     expect(personal.teamId).toBeNull();
   });
 
+  it("denies readers from commenting where the comment would become team-visible", async () => {
+    const author = await createMember("Comment Author");
+    const member = await createMember("Reader Commenter");
+    await grantTeamReader(db, {
+      authUserId: member.authUserId,
+      expiresAt: new Date(Date.now() + 86_400_000),
+    });
+    const reader = { ...member.viewer, teamRole: "reader" as const };
+
+    const teamMemo = await createMemo(db, author.viewer, {
+      content: "team parent",
+      visibility: "protected",
+      source: "web",
+    });
+    await expect(
+      createMemoComment(db, reader, teamMemo.id, { content: "reply" }),
+    ).rejects.toThrow(ForbiddenError);
+
+    // A comment on a private memo stays private and remains allowed.
+    const personalMemo = await createMemo(db, reader, {
+      content: "personal parent",
+      visibility: "private",
+      source: "web",
+    });
+    await expect(
+      createMemoComment(db, reader, personalMemo.id, { content: "reply" }),
+    ).resolves.toBeTruthy();
+  });
+
+  it("downgrades imported team memos to private for readers", async () => {
+    const member = await createMember("Reader Importer");
+    await grantTeamReader(db, {
+      authUserId: member.authUserId,
+      expiresAt: new Date(Date.now() + 86_400_000),
+    });
+    const reader = { ...member.viewer, teamRole: "reader" as const };
+    const team = await getDefaultTeam(db);
+
+    const bundle = importBundleSchema.parse({
+      version: 6,
+      memos: [
+        {
+          name: "memos/reader-import",
+          content: "restored from a backup",
+          visibility: "protected",
+          state: "normal",
+          pinned: false,
+          payload: {},
+          team_id: team?.id ?? null,
+          create_time: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+    });
+    await importData(db, reader, bundle);
+
+    const imported = await db
+      .select()
+      .from(memos)
+      .where(eq(memos.id, "memos/reader-import"))
+      .get();
+    expect(imported?.visibility).toBe("private");
+    expect(imported?.teamId).toBeNull();
+  });
+
   it("cuts off access automatically when the reader seat expires", async () => {
     const member = await createMember("Lapsed");
     // Grant, then lapse: the past-dated expiry folds the membership out at
@@ -206,6 +279,51 @@ describe("team users", () => {
     // Revocation removes the membership row entirely.
     await revokeTeamReader(db, member.authUserId);
     expect(await getViewerTeamMembership(db, member.authUserId)).toBeNull();
+  });
+
+  it("joins admin users in one pass across unlinked and multi-org identities", async () => {
+    const mapped = await createMember("Mapped");
+    const unlinked = await createFlaremoMember(db, {
+      email: "unlinked@example.com",
+      name: "Unlinked",
+    });
+    const now = new Date();
+    await db.insert(authOrganizations).values({
+      id: "org/secondary",
+      name: "Secondary",
+      slug: "secondary",
+      logo: null,
+      metadata: null,
+      createdAt: now,
+    });
+    await db.insert(authMembers).values({
+      id: "member/secondary",
+      organizationId: "org/secondary",
+      userId: mapped.authUserId,
+      role: "admin",
+      expiresAt: null,
+      createdAt: now,
+    });
+
+    // Keep this above the D1 binding threshold to guard against a future
+    // per-user query or IN-list implementation in the admin read path.
+    for (let index = 0; index < 105; index += 1) {
+      await createFlaremoMember(db, {
+        email: `bulk-${index}@example.com`,
+        name: `Bulk ${index}`,
+      });
+    }
+
+    const rows = await listFlaremoUsersWithMemberships(db);
+    expect(rows).toHaveLength(108);
+    expect(rows.find((row) => row.user.id === unlinked.id)).toMatchObject({
+      authUser: null,
+      membership: null,
+    });
+    expect(rows.find((row) => row.user.id === mapped.id)).toMatchObject({
+      authUser: { id: mapped.authUserId },
+      membership: { role: "member" },
+    });
   });
 
   it("removes private data and adopts team content into the owner account", async () => {
