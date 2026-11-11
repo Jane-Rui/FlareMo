@@ -2,11 +2,8 @@ import {
   assertMemberQuota,
   createFlaremoMemberWithLink,
   deriveUniqueUsername,
-  getAuthUserById,
-  getAuthUserIdByFlaremoUserId,
-  listFlaremoUsers,
+  listFlaremoUsersWithMemberships,
 } from "@flaremo/domain";
-import { zValidator } from "@hono/zod-validator";
 import type { Hono } from "hono";
 import {
   type getBrowserRequestContext,
@@ -14,11 +11,12 @@ import {
   loadAuthFactory,
 } from "../../context";
 import { jsonError } from "../../http";
+import { zValidator } from "../../validated";
 import {
   createUserSchema,
   readerExpiresAt,
   teamAdminContext,
-  teamMembershipInfo,
+  teamAdminSessionContext,
 } from "./context";
 
 /**
@@ -73,30 +71,23 @@ export function registerUsersRoutes(app: Hono<HonoBindings>) {
   app.get("/users", async (c) => {
     try {
       const { db } = await teamAdminContext(c);
-      const members = await listFlaremoUsers(db);
-      const rows = await Promise.all(
-        members.map(async (member) => {
-          const authUserId = await getAuthUserIdByFlaremoUserId(db, member.id);
-          const authUser = authUserId
-            ? await getAuthUserById(db, authUserId)
-            : null;
-          const membership = authUserId
-            ? await teamMembershipInfo(db, member.id)
-            : null;
-          return {
-            id: member.id,
-            email: authUser?.email ?? member.email,
-            name: member.name,
-            username: authUser?.username ?? member.id.replace(/^users\//, ""),
-            role: membership?.role ?? null,
-            reader_expires_at: membership
-              ? readerExpiresAt(membership.expiresAt)
-              : null,
-            status: member.status,
-            created_at: member.createdAt,
-          };
-        }),
-      );
+      const members = await listFlaremoUsersWithMemberships(db);
+      const rows = members.map(({ user: member, authUser, membership }) => ({
+        id: member.id,
+        email: authUser?.email ?? member.email,
+        name: member.name,
+        username: authUser?.username ?? member.id.replace(/^users\//, ""),
+        // The uploaded avatar, so a member's row shows the face they see on
+        // their own sidebar; without one both fall back to the same
+        // name-seeded generated avatar.
+        avatar_url: member.avatarUrl ?? null,
+        role: membership?.role ?? null,
+        reader_expires_at: membership
+          ? readerExpiresAt(membership.expiresAt)
+          : null,
+        status: member.status,
+        created_at: member.createdAt,
+      }));
       return c.json({ users: rows });
     } catch (error) {
       return jsonError(c, error);
@@ -105,7 +96,8 @@ export function registerUsersRoutes(app: Hono<HonoBindings>) {
 
   app.post("/users", zValidator("json", createUserSchema), async (c) => {
     try {
-      const context = await teamAdminContext(c);
+      // Returns an activation link, so a browser session is required.
+      const context = await teamAdminSessionContext(c);
       const input = c.req.valid("json");
       const { member, username, activationToken } = await createMemberAccount(
         c,
